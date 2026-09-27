@@ -76,7 +76,7 @@ from backtest.report import BacktestReport
 # ============================================================
 
 from strategy.entry import EntryStrategy
-
+from strategy.risk import RiskManager
 
 # ============================================================
 # 基本設定
@@ -2057,7 +2057,571 @@ if run_analysis:
 
         st.exception(e)
 
+    # ========================================================
+    # ⑫ リスク・資金管理
+    # ========================================================
 
+    st.divider()
+
+    st.header(
+        "⑫ 🛡️ リスク・資金管理"
+    )
+
+    st.write(
+        "エントリー判断と現在の株価をもとに、"
+        "購入可能株数・損切り価格・利益確定価格・"
+        "最大想定損失を計算します。"
+    )
+
+
+    try:
+
+        # ====================================================
+        # リスク管理設定
+        # ====================================================
+
+        INITIAL_CAPITAL = 1_000_000
+
+
+        risk_manager = RiskManager(
+            lot_size=100,
+            risk_per_trade=0.01,
+            max_position_rate=0.50,
+            stop_loss_rate=0.05,
+            take_profit_rate=0.10,
+            commission_rate=0.001,
+            slippage_rate=0.001
+        )
+
+
+        # ====================================================
+        # 現在価格を使ってリスク計算
+        # ====================================================
+
+        risk_result = (
+            risk_manager.evaluate_trade(
+                capital=INITIAL_CAPITAL,
+                market_price=close_price
+            )
+        )
+
+
+        can_trade = (
+            risk_result[
+                "can_trade"
+            ]
+        )
+
+        risk_status = (
+            risk_result[
+                "status"
+            ]
+        )
+
+        risk_reason = (
+            risk_result[
+                "reason"
+            ]
+        )
+
+
+        # ====================================================
+        # 最終売買判断
+        # ====================================================
+
+        st.subheader(
+            "🚦 最終エントリー確認"
+        )
+
+
+        if (
+            entry_action == "BUY"
+            and can_trade
+        ):
+
+            st.success(
+                "🟢 BUY条件成立 ＋ 資金管理OK"
+            )
+
+            st.write(
+                "エントリー戦略とリスク管理の"
+                "両方の条件を満たしています。"
+            )
+
+
+        elif (
+            entry_action == "BUY"
+            and not can_trade
+        ):
+
+            st.warning(
+                "🟡 BUY条件成立 / 資金管理で見送り"
+            )
+
+            st.write(
+                risk_reason
+            )
+
+
+        elif (
+            entry_action == "WAIT"
+        ):
+
+            st.info(
+                "⚪ 現在はWAIT"
+            )
+
+            st.write(
+                "エントリー条件を満たしていないため、"
+                "実際の購入候補にはしません。"
+            )
+
+
+        # ====================================================
+        # 基本資金
+        # ====================================================
+
+        st.subheader(
+            "💴 資金状況"
+        )
+
+
+        capital = (
+            risk_result[
+                "capital"
+            ]
+        )
+
+        risk_budget = (
+            risk_result[
+                "risk_budget"
+            ]
+        )
+
+        max_position_value = (
+            risk_result[
+                "max_position_value"
+            ]
+        )
+
+
+        col1, col2, col3 = st.columns(3)
+
+
+        with col1:
+
+            st.metric(
+                "運用資金",
+                f"{capital:,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "1取引の許容損失",
+                f"{risk_budget:,.0f} 円"
+            )
+
+
+        with col3:
+
+            st.metric(
+                "最大投資金額",
+                f"{max_position_value:,.0f} 円"
+            )
+
+
+        # ====================================================
+        # 購入価格・株数
+        # ====================================================
+
+        st.subheader(
+            "📦 ポジションサイズ"
+        )
+
+
+        market_price = (
+            risk_result[
+                "market_price"
+            ]
+        )
+
+        entry_price = (
+            risk_result[
+                "entry_price"
+            ]
+        )
+
+        shares = (
+            risk_result[
+                "shares"
+            ]
+        )
+
+        lots = (
+            risk_result[
+                "lots"
+            ]
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "基準株価",
+                f"{market_price:,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "想定購入価格",
+                f"{entry_price:,.0f} 円"
+            )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "購入可能株数",
+                f"{shares:,} 株"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "購入単位",
+                f"{lots:,} 単元"
+            )
+
+
+        # ====================================================
+        # 必要資金
+        # ====================================================
+
+        purchase_value = (
+            risk_result[
+                "purchase_value"
+            ]
+        )
+
+        buy_commission = (
+            risk_result[
+                "buy_commission"
+            ]
+        )
+
+        required_cash = (
+            risk_result[
+                "required_cash"
+            ]
+        )
+
+
+        col1, col2, col3 = st.columns(3)
+
+
+        with col1:
+
+            st.metric(
+                "株式購入代金",
+                f"{purchase_value:,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "想定購入手数料",
+                f"{buy_commission:,.0f} 円"
+            )
+
+
+        with col3:
+
+            st.metric(
+                "必要資金",
+                f"{required_cash:,.0f} 円"
+            )
+
+
+        # ====================================================
+        # 損切り / 利益確定
+        # ====================================================
+
+        st.subheader(
+            "🎯 損切り・利益確定"
+        )
+
+
+        stop_price = (
+            risk_result[
+                "stop_price"
+            ]
+        )
+
+        take_profit_price = (
+            risk_result[
+                "take_profit_price"
+            ]
+        )
+
+        expected_loss = (
+            risk_result[
+                "expected_loss"
+            ]
+        )
+
+        reward_risk_ratio = (
+            risk_result[
+                "reward_risk_ratio"
+            ]
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "損切り価格",
+                f"{stop_price:,.0f} 円",
+                delta="-5.0%"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "利益確定価格",
+                f"{take_profit_price:,.0f} 円",
+                delta="+10.0%"
+            )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "最大想定価格損失",
+                f"{expected_loss:,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "リスクリワード比",
+                f"{reward_risk_ratio:.2f}"
+            )
+
+
+        # ====================================================
+        # リスク率
+        # ====================================================
+
+        st.subheader(
+            "⚖️ 資金リスク"
+        )
+
+
+        actual_risk_rate = (
+            risk_result[
+                "actual_risk_rate"
+            ]
+        )
+
+        position_rate = (
+            risk_result[
+                "position_rate"
+            ]
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "実際の資金リスク率",
+                f"{actual_risk_rate * 100:.2f}%"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "資金投入率",
+                f"{position_rate * 100:.2f}%"
+            )
+
+
+        # ====================================================
+        # どの制限で株数が決まったか
+        # ====================================================
+
+        st.subheader(
+            "🔍 株数計算"
+        )
+
+
+        shares_by_risk = (
+            risk_result[
+                "shares_by_risk"
+            ]
+        )
+
+        shares_by_position = (
+            risk_result[
+                "shares_by_position_limit"
+            ]
+        )
+
+        shares_by_cash = (
+            risk_result[
+                "shares_by_cash"
+            ]
+        )
+
+
+        position_table = pd.DataFrame(
+            [
+                {
+                    "計算基準":
+                        "1取引リスク上限",
+
+                    "購入可能株数":
+                        shares_by_risk
+                },
+
+                {
+                    "計算基準":
+                        "最大投資比率",
+
+                    "購入可能株数":
+                        shares_by_position
+                },
+
+                {
+                    "計算基準":
+                        "現金残高",
+
+                    "購入可能株数":
+                        shares_by_cash
+                }
+            ]
+        )
+
+
+        st.dataframe(
+            position_table,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+        st.caption(
+            "3つの計算結果のうち最も少ない株数を採用し、"
+            "100株単位に調整します。"
+        )
+
+
+        # ====================================================
+        # リスク管理判定
+        # ====================================================
+
+        st.subheader(
+            "🛡️ リスク管理判定"
+        )
+
+
+        if can_trade:
+
+            st.success(
+                "✅ 資金管理条件：購入可能"
+            )
+
+            st.write(
+                risk_reason
+            )
+
+        else:
+
+            st.warning(
+                "⚠️ 資金管理条件：NO TRADE"
+            )
+
+            st.write(
+                risk_reason
+            )
+
+
+        # ====================================================
+        # 現在の設定
+        # ====================================================
+
+        with st.expander(
+            "現在のリスク管理設定を見る"
+        ):
+
+            st.write(
+                "運用資金：1,000,000円"
+            )
+
+            st.write(
+                "売買単位：100株"
+            )
+
+            st.write(
+                "1取引の最大リスク：資金の1%"
+            )
+
+            st.write(
+                "1銘柄への最大投資比率：50%"
+            )
+
+            st.write(
+                "損切り：購入価格から-5%"
+            )
+
+            st.write(
+                "利益確定：購入価格から+10%"
+            )
+
+            st.write(
+                "購入手数料：0.1%（検証用仮定）"
+            )
+
+            st.write(
+                "スリッページ：0.1%（検証用仮定）"
+            )
+
+
+        st.success(
+            "🎉 リスク・資金管理まで正常に完了しました。"
+        )
+
+
+    except Exception as e:
+
+        st.error(
+            "❌ リスク・資金管理中にエラーが発生しました。"
+        )
+
+        st.exception(e)
 # ============================================================
 # 開発状況
 # ============================================================
@@ -2099,19 +2663,24 @@ development_status = {
         "✅ 完了",
 
     "エントリー判断":
-        "✅ 今回追加",
 
-    "売却判断":
-        "🔵 次の段階",
+    "✅ 完了",
 
-    "リスク管理":
-        "🔵 未実装",
+"売却判断":
 
-    "ペーパートレード":
-        "🔵 未実装",
+    "✅ ファイル完成",
 
-    "実注文":
-        "⚪ OFF"
+"リスク管理":
+
+    "✅ 今回追加",
+
+"戦略対応バックテスト":
+
+    "🔵 次の段階",
+
+"ペーパートレード":
+
+    "🔵 未実装",
 }
 
 
