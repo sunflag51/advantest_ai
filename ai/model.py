@@ -2,19 +2,26 @@
 # アドバンテスト AI売買システム
 # ai/model.py
 #
-# AI予測モデル
+# 市場データ対応 AI予測モデル
+#
+# 使用する情報
+# ・アドバンテストのテクニカル指標
+# ・日経平均
+# ・NASDAQ
+# ・SOXX
+# ・ドル円
 #
 # 目的
-# ・過去の株価データからAIを学習
-# ・翌営業日に株価が上昇する確率を予測
+# ・翌営業日に終値が上昇する確率を予測
 #
-# 今回使用するモデル
-# Random Forest
+# モデル
+# ・RandomForestClassifier
 #
 # 重要
-# ・このファイルでは実際の売買注文を行いません
-# ・「買い」「売り」を直接決定しません
-# ・AIは上昇確率を予測します
+# ・時系列順で学習 / テストを分割
+# ・ランダムシャッフルしない
+# ・未来の終値は正解ラベル作成にのみ使用
+# ・実際の売買注文は行わない
 # ============================================================
 
 
@@ -22,99 +29,53 @@ import numpy as np
 import pandas as pd
 
 from sklearn.ensemble import RandomForestClassifier
+
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
     recall_score,
-    roc_auc_score
+    f1_score,
+    roc_auc_score,
+    confusion_matrix
 )
 
 
 # ============================================================
-# 使用する特徴量
+# features.py
 # ============================================================
 
-DEFAULT_FEATURE_COLUMNS = [
-
-    # --------------------------------------------------------
-    # 価格変化率
-    # --------------------------------------------------------
-
-    "Return_1D",
-    "Return_5D",
-    "Return_20D",
-    "Return_60D",
-
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
-
-    "RSI_14",
-
-    # --------------------------------------------------------
-    # MACD
-    # --------------------------------------------------------
-
-    "MACD",
-    "MACD_Signal",
-    "MACD_Histogram",
-
-    # --------------------------------------------------------
-    # ボリンジャーバンド
-    # --------------------------------------------------------
-
-    "BB_Width",
-    "BB_Position",
-
-    # --------------------------------------------------------
-    # ATR
-    # --------------------------------------------------------
-
-    "ATR_14",
-
-    # --------------------------------------------------------
-    # 出来高
-    # --------------------------------------------------------
-
-    "Volume_Ratio",
-
-    # --------------------------------------------------------
-    # ボラティリティ
-    # --------------------------------------------------------
-
-    "Volatility_20D",
-
-    # --------------------------------------------------------
-    # トレンド
-    # --------------------------------------------------------
-
-    "Trend_5_25",
-    "Trend_25_75",
-
-    "Price_vs_SMA25",
-    "Price_vs_SMA75"
-]
+from ai.features import (
+    get_ai_feature_columns
+)
 
 
 # ============================================================
-# AIモデルクラス
+# AIモデル
 # ============================================================
 
 class StockPredictionModel:
+
     """
-    株価上昇確率予測モデル
+    アドバンテスト翌営業日上昇確率予測モデル
     """
+
+    # ========================================================
+    # 初期化
+    # ========================================================
 
     def __init__(
         self,
-        n_estimators=300,
+        n_estimators=500,
         max_depth=8,
+        min_samples_split=10,
         min_samples_leaf=5,
+        max_features="sqrt",
         random_state=42
     ):
-        """
-        Random Forestモデルを作成
-        """
+
+        # ----------------------------------------------------
+        # Random Forest
+        # ----------------------------------------------------
 
         self.model = RandomForestClassifier(
 
@@ -122,63 +83,119 @@ class StockPredictionModel:
 
             max_depth=max_depth,
 
+            min_samples_split=min_samples_split,
+
             min_samples_leaf=min_samples_leaf,
 
-            random_state=random_state,
+            max_features=max_features,
 
             class_weight="balanced",
+
+            random_state=random_state,
 
             n_jobs=-1
         )
 
+
+        # ----------------------------------------------------
+        # 学習に使用した特徴量
+        # ----------------------------------------------------
+
         self.feature_columns = []
 
+
+        # ----------------------------------------------------
+        # 学習済みか
+        # ----------------------------------------------------
+
         self.is_trained = False
+
+
+        # ----------------------------------------------------
+        # 評価指標
+        # ----------------------------------------------------
 
         self.metrics = {}
 
 
+        # ----------------------------------------------------
+        # テスト結果
+        # ----------------------------------------------------
+
+        self.test_results = None
+
+
     # ========================================================
-    # 正解データ作成
+    # 正解ラベル作成
     # ========================================================
 
     @staticmethod
     def create_target(
         data
     ):
+
         """
-        翌営業日の終値が現在の終値より高い場合
+        翌営業日の終値が
+        当日の終値より高い場合
 
         1 = 上昇
         0 = 下落または同値
 
-        とする。
-
-        重要：
-        現在の日の情報だけを使って
-        翌営業日の結果を予測する。
+        最終日は翌営業日の終値が存在しないため
+        NaNにする。
         """
 
-        df = data.copy()
+        if data is None or data.empty:
+
+            raise ValueError(
+                "正解ラベルを作成するデータがありません。"
+            )
+
+
+        if "Close" not in data.columns:
+
+            raise ValueError(
+                "Close列がありません。"
+            )
+
+
+        # ----------------------------------------------------
+        # 翌営業日終値
+        # ----------------------------------------------------
 
         next_close = (
-            df["Close"]
+            data["Close"]
             .shift(-1)
         )
 
-        target = (
-            next_close >
-            df["Close"]
-        ).astype(int)
 
-        # 最終日は翌日の価格が存在しないためNaN扱い
-        target.iloc[-1] = np.nan
+        # ----------------------------------------------------
+        # 上昇 / 下落
+        # ----------------------------------------------------
+
+        target = (
+            next_close
+            > data["Close"]
+        ).astype(float)
+
+
+        # ----------------------------------------------------
+        # 最終日は正解不明
+        # ----------------------------------------------------
+
+        target.loc[
+            next_close.isna()
+        ] = np.nan
+
+
+        target.name = "Target"
+
 
         return target
 
 
     # ========================================================
-    # 学習データ作成
+    # 学習データ準備
     # ========================================================
 
     def prepare_training_data(
@@ -186,14 +203,20 @@ class StockPredictionModel:
         data,
         feature_columns=None
     ):
+
         """
-        AI学習用データを作成する
+        AI学習用
+
+        X = 特徴量
+        y = 翌営業日上昇 / 下落
+
+        を作成する。
         """
 
         if data is None or data.empty:
 
             raise ValueError(
-                "学習用データが空です。"
+                "AI学習用データがありません。"
             )
 
 
@@ -201,32 +224,70 @@ class StockPredictionModel:
 
 
         # ----------------------------------------------------
-        # 使用する特徴量
+        # 日付順に並べる
+        # ----------------------------------------------------
+
+        df.sort_index(
+            inplace=True
+        )
+
+
+        # ----------------------------------------------------
+        # AI特徴量取得
         # ----------------------------------------------------
 
         if feature_columns is None:
 
             feature_columns = (
-                DEFAULT_FEATURE_COLUMNS.copy()
+                get_ai_feature_columns(
+                    df
+                )
+            )
+
+
+        if not feature_columns:
+
+            raise ValueError(
+                "AIで使用できる特徴量がありません。"
             )
 
 
         # ----------------------------------------------------
-        # 実際に存在する列だけ確認
+        # 重複削除
+        # ----------------------------------------------------
+
+        feature_columns = list(
+            dict.fromkeys(
+                feature_columns
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # 存在確認
         # ----------------------------------------------------
 
         missing_columns = [
+
             column
-            for column in feature_columns
-            if column not in df.columns
+
+            for column
+            in feature_columns
+
+            if column
+            not in df.columns
         ]
 
 
         if missing_columns:
 
             raise ValueError(
+
                 "AIに必要な特徴量がありません："
-                + ", ".join(missing_columns)
+
+                + ", ".join(
+                    missing_columns
+                )
             )
 
 
@@ -240,16 +301,19 @@ class StockPredictionModel:
 
 
         # ----------------------------------------------------
-        # 正解データ
+        # 数値へ変換
         # ----------------------------------------------------
 
-        y = self.create_target(
-            df
-        )
+        for column in X.columns:
+
+            X[column] = pd.to_numeric(
+                X[column],
+                errors="coerce"
+            )
 
 
         # ----------------------------------------------------
-        # 無限大をNaNにする
+        # 無限大をNaN
         # ----------------------------------------------------
 
         X.replace(
@@ -260,10 +324,16 @@ class StockPredictionModel:
 
 
         # ----------------------------------------------------
-        # 欠損値を削除
-        #
-        # RSIや移動平均などは
-        # 最初の数日間にNaNが発生する
+        # 正解ラベル
+        # ----------------------------------------------------
+
+        y = self.create_target(
+            df
+        )
+
+
+        # ----------------------------------------------------
+        # 特徴量と正解が揃っている日のみ使用
         # ----------------------------------------------------
 
         valid_mask = (
@@ -274,29 +344,42 @@ class StockPredictionModel:
 
         X = X.loc[
             valid_mask
-        ]
+        ].copy()
+
 
         y = y.loc[
             valid_mask
-        ]
+        ].copy()
 
+
+        # ----------------------------------------------------
+        # データ件数確認
+        # ----------------------------------------------------
 
         if len(X) < 100:
 
             raise ValueError(
-                "AI学習に必要なデータが不足しています。"
-                "最低100件以上を推奨します。"
+
+                "AI学習に使用できるデータが"
+
+                f"{len(X)}件しかありません。"
+
+                "100件以上必要です。"
             )
 
 
         # ----------------------------------------------------
-        # 型を整理
+        # 型
         # ----------------------------------------------------
 
         X = X.astype(float)
 
         y = y.astype(int)
 
+
+        # ----------------------------------------------------
+        # 特徴量保存
+        # ----------------------------------------------------
 
         self.feature_columns = (
             feature_columns.copy()
@@ -316,20 +399,25 @@ class StockPredictionModel:
         y,
         train_ratio=0.8
     ):
+
         """
-        時系列データを
+        古いデータ → AI学習
 
-        過去80% → 学習
-        新しい20% → テスト
+        新しいデータ → AIテスト
 
-        に分割する。
-
-        通常のランダム分割ではなく、
-        時系列順を維持する。
+        ランダムシャッフルはしない。
         """
+
+        if not 0.5 <= train_ratio < 1.0:
+
+            raise ValueError(
+                "train_ratioは0.5以上1.0未満にしてください。"
+            )
+
 
         split_index = int(
-            len(X) * train_ratio
+            len(X)
+            * train_ratio
         )
 
 
@@ -385,8 +473,10 @@ class StockPredictionModel:
         feature_columns=None,
         train_ratio=0.8
     ):
+
         """
-        AIモデルを学習する
+        Random Forestを学習し、
+        新しい20%程度のデータで検証する。
         """
 
         # ----------------------------------------------------
@@ -395,8 +485,10 @@ class StockPredictionModel:
 
         X, y = (
             self.prepare_training_data(
-                data,
-                feature_columns
+
+                data=data,
+
+                feature_columns=feature_columns
             )
         )
 
@@ -410,11 +502,26 @@ class StockPredictionModel:
             X_test,
             y_train,
             y_test
+
         ) = self.time_series_split(
-            X,
-            y,
-            train_ratio
+
+            X=X,
+
+            y=y,
+
+            train_ratio=train_ratio
         )
+
+
+        # ----------------------------------------------------
+        # 学習データに両クラスがあるか確認
+        # ----------------------------------------------------
+
+        if y_train.nunique() < 2:
+
+            raise ValueError(
+                "学習データに上昇・下落の両方がありません。"
+            )
 
 
         # ----------------------------------------------------
@@ -441,6 +548,10 @@ class StockPredictionModel:
         )
 
 
+        # ----------------------------------------------------
+        # 上昇確率
+        # ----------------------------------------------------
+
         probabilities = (
             self.model.predict_proba(
                 X_test
@@ -449,7 +560,7 @@ class StockPredictionModel:
 
 
         # ----------------------------------------------------
-        # 精度
+        # Accuracy
         # ----------------------------------------------------
 
         accuracy = (
@@ -460,19 +571,49 @@ class StockPredictionModel:
         )
 
 
+        # ----------------------------------------------------
+        # Precision
+        # ----------------------------------------------------
+
         precision = (
             precision_score(
+
                 y_test,
+
                 predictions,
+
                 zero_division=0
             )
         )
 
 
+        # ----------------------------------------------------
+        # Recall
+        # ----------------------------------------------------
+
         recall = (
             recall_score(
+
                 y_test,
+
                 predictions,
+
+                zero_division=0
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # F1
+        # ----------------------------------------------------
+
+        f1 = (
+            f1_score(
+
+                y_test,
+
+                predictions,
+
                 zero_division=0
             )
         )
@@ -484,12 +625,21 @@ class StockPredictionModel:
 
         try:
 
-            auc = (
-                roc_auc_score(
-                    y_test,
-                    probabilities
+            if y_test.nunique() >= 2:
+
+                auc = (
+                    roc_auc_score(
+
+                        y_test,
+
+                        probabilities
+                    )
                 )
-            )
+
+            else:
+
+                auc = np.nan
+
 
         except ValueError:
 
@@ -497,7 +647,54 @@ class StockPredictionModel:
 
 
         # ----------------------------------------------------
-        # 指標保存
+        # 混同行列
+        # ----------------------------------------------------
+
+        cm = confusion_matrix(
+
+            y_test,
+
+            predictions,
+
+            labels=[
+                0,
+                1
+            ]
+        )
+
+
+        true_negative = int(
+            cm[0, 0]
+        )
+
+        false_positive = int(
+            cm[0, 1]
+        )
+
+        false_negative = int(
+            cm[1, 0]
+        )
+
+        true_positive = int(
+            cm[1, 1]
+        )
+
+
+        # ----------------------------------------------------
+        # 上昇率
+        # ----------------------------------------------------
+
+        train_up_rate = float(
+            y_train.mean()
+        )
+
+        test_up_rate = float(
+            y_test.mean()
+        )
+
+
+        # ----------------------------------------------------
+        # 評価結果
         # ----------------------------------------------------
 
         self.metrics = {
@@ -511,33 +708,91 @@ class StockPredictionModel:
             "recall":
                 float(recall),
 
+            "f1":
+                float(f1),
+
             "auc":
-                float(auc)
-                if not np.isnan(auc)
-                else None,
+                (
+                    float(auc)
+
+                    if not np.isnan(auc)
+
+                    else None
+                ),
 
             "train_samples":
-                len(X_train),
+                int(
+                    len(X_train)
+                ),
 
             "test_samples":
-                len(X_test)
+                int(
+                    len(X_test)
+                ),
+
+            "feature_count":
+                int(
+                    len(
+                        self.feature_columns
+                    )
+                ),
+
+            "train_up_rate":
+                train_up_rate,
+
+            "test_up_rate":
+                test_up_rate,
+
+            "true_negative":
+                true_negative,
+
+            "false_positive":
+                false_positive,
+
+            "false_negative":
+                false_negative,
+
+            "true_positive":
+                true_positive,
         }
+
+
+        # ----------------------------------------------------
+        # テスト結果保存
+        # ----------------------------------------------------
+
+        self.test_results = pd.DataFrame(
+
+            {
+
+                "Actual":
+                    y_test,
+
+                "Prediction":
+                    predictions,
+
+                "Probability_Up":
+                    probabilities
+            },
+
+            index=X_test.index
+        )
 
 
         return self.metrics
 
 
     # ========================================================
-    # 上昇確率予測
+    # 最新データ作成
     # ========================================================
 
-    def predict_probability(
+    def prepare_latest_features(
         self,
         data
     ):
+
         """
-        最新データから
-        翌営業日の上昇確率を予測する
+        最新日の特徴量をAI予測用に準備する。
         """
 
         if not self.is_trained:
@@ -555,6 +810,34 @@ class StockPredictionModel:
 
 
         # ----------------------------------------------------
+        # 必要な特徴量確認
+        # ----------------------------------------------------
+
+        missing_columns = [
+
+            column
+
+            for column
+            in self.feature_columns
+
+            if column
+            not in data.columns
+        ]
+
+
+        if missing_columns:
+
+            raise ValueError(
+
+                "最新予測に必要な特徴量がありません："
+
+                + ", ".join(
+                    missing_columns
+                )
+            )
+
+
+        # ----------------------------------------------------
         # 最新行
         # ----------------------------------------------------
 
@@ -563,81 +846,152 @@ class StockPredictionModel:
         ].copy()
 
 
-        # ----------------------------------------------------
-        # 特徴量確認
-        # ----------------------------------------------------
-
-        missing_columns = [
-            column
-            for column in self.feature_columns
-            if column not in latest.columns
-        ]
-
-
-        if missing_columns:
-
-            raise ValueError(
-                "予測に必要な特徴量がありません："
-                + ", ".join(missing_columns)
-            )
-
-
         X_latest = latest[
             self.feature_columns
         ].copy()
 
 
         # ----------------------------------------------------
-        # 欠損値確認
+        # 数値化
         # ----------------------------------------------------
 
-        if X_latest.isna().any().any():
+        for column in X_latest.columns:
 
-            raise ValueError(
-                "最新データに欠損値があります。"
+            X_latest[column] = (
+                pd.to_numeric(
+
+                    X_latest[column],
+
+                    errors="coerce"
+                )
             )
 
 
         # ----------------------------------------------------
-        # 上昇確率
+        # 無限大
         # ----------------------------------------------------
 
-        probability = (
-            self.model.predict_proba(
-                X_latest
-            )[0, 1]
+        X_latest.replace(
+
+            [np.inf, -np.inf],
+
+            np.nan,
+
+            inplace=True
         )
 
 
-        return float(
-            probability
-        )
+        # ----------------------------------------------------
+        # 欠損値確認
+        # ----------------------------------------------------
+
+        missing_latest = [
+
+            column
+
+            for column
+            in X_latest.columns
+
+            if X_latest[column]
+            .isna()
+            .any()
+        ]
+
+
+        if missing_latest:
+
+            raise ValueError(
+
+                "最新日のAI特徴量に欠損があります："
+
+                + ", ".join(
+                    missing_latest
+                )
+            )
+
+
+        return X_latest
 
 
     # ========================================================
-    # 上昇・下落予測
+    # 上昇確率
+    # ========================================================
+
+    def predict_probability(
+        self,
+        data
+    ):
+
+        """
+        最新日の特徴量から
+        翌営業日の上昇確率を予測する。
+        """
+
+        X_latest = (
+            self.prepare_latest_features(
+                data
+            )
+        )
+
+
+        probabilities = (
+            self.model.predict_proba(
+                X_latest
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # class 1 の位置を安全に取得
+        # ----------------------------------------------------
+
+        classes = list(
+            self.model.classes_
+        )
+
+
+        if 1 not in classes:
+
+            raise RuntimeError(
+                "AIモデルに上昇クラスがありません。"
+            )
+
+
+        up_index = (
+            classes.index(1)
+        )
+
+
+        probability_up = float(
+            probabilities[
+                0,
+                up_index
+            ]
+        )
+
+
+        return probability_up
+
+
+    # ========================================================
+    # 最新予測
     # ========================================================
 
     def predict(
         self,
-        data
+        data,
+        threshold=0.5
     ):
+
         """
-        最新データから
+        最新日の
 
         ・上昇確率
         ・下落確率
-        ・予測
+        ・方向予測
 
-        を返す
+        を返す。
         """
-
-        if not self.is_trained:
-
-            raise RuntimeError(
-                "AIモデルがまだ学習されていません。"
-            )
-
 
         probability_up = (
             self.predict_probability(
@@ -647,14 +1001,18 @@ class StockPredictionModel:
 
 
         probability_down = (
-            1 -
-            probability_up
+            1.0
+            - probability_up
         )
 
 
         prediction = (
+
             1
-            if probability_up >= 0.5
+
+            if probability_up
+            >= threshold
+
             else 0
         )
 
@@ -671,9 +1029,18 @@ class StockPredictionModel:
                 prediction,
 
             "prediction_text":
-                "上昇"
-                if prediction == 1
-                else "下落"
+                (
+                    "上昇"
+
+                    if prediction == 1
+
+                    else "下落"
+                ),
+
+            "threshold":
+                float(
+                    threshold
+                ),
         }
 
 
@@ -684,8 +1051,10 @@ class StockPredictionModel:
     def get_feature_importance(
         self
     ):
+
         """
-        AIがどの特徴量を重視したかを取得する
+        Random Forestが
+        どの特徴量をどれだけ使用したかを返す。
         """
 
         if not self.is_trained:
@@ -701,7 +1070,9 @@ class StockPredictionModel:
 
 
         result = pd.DataFrame(
+
             {
+
                 "feature":
                     self.feature_columns,
 
@@ -712,19 +1083,54 @@ class StockPredictionModel:
 
 
         result.sort_values(
+
             "importance",
+
             ascending=False,
+
             inplace=True
         )
 
 
         result.reset_index(
+
             drop=True,
+
             inplace=True
         )
 
 
         return result
+
+
+    # ========================================================
+    # テスト結果
+    # ========================================================
+
+    def get_test_results(
+        self
+    ):
+
+        """
+        AIのテスト期間における
+        日別予測結果を返す。
+        """
+
+        if not self.is_trained:
+
+            raise RuntimeError(
+                "AIモデルがまだ学習されていません。"
+            )
+
+
+        if self.test_results is None:
+
+            return pd.DataFrame()
+
+
+        return (
+            self.test_results.copy()
+        )
 
 
     # ========================================================
@@ -734,8 +1140,9 @@ class StockPredictionModel:
     def get_model_info(
         self
     ):
+
         """
-        モデル情報を取得する
+        AIモデルの情報を返す。
         """
 
         return {
@@ -743,21 +1150,24 @@ class StockPredictionModel:
             "model":
                 "RandomForestClassifier",
 
-            "features":
+            "trained":
+                self.is_trained,
+
+            "feature_count":
                 len(
                     self.feature_columns
                 ),
 
-            "trained":
-                self.is_trained,
+            "feature_columns":
+                self.feature_columns.copy(),
 
             "metrics":
-                self.metrics
+                self.metrics.copy(),
         }
 
 
 # ============================================================
-# 簡単にAIを学習する関数
+# AIを簡単に学習する関数
 # ============================================================
 
 def train_stock_model(
@@ -765,39 +1175,51 @@ def train_stock_model(
     feature_columns=None,
     train_ratio=0.8
 ):
+
     """
-    AIモデルを作成して学習する
+    AIモデルを作成し、
+    学習まで一度に行う。
     """
 
-    model = StockPredictionModel()
+    model = (
+        StockPredictionModel()
+    )
 
 
     metrics = model.train(
+
         data=data,
+
         feature_columns=feature_columns,
+
         train_ratio=train_ratio
     )
 
 
-    return model, metrics
+    return (
+        model,
+        metrics
+    )
 
 
 # ============================================================
-# 最新の上昇確率を取得
+# 最新AI予測
 # ============================================================
 
 def predict_stock_probability(
     model,
-    data
+    data,
+    threshold=0.5
 ):
+
     """
-    学習済みモデルから
-    最新の上昇確率を取得する
+    学習済みAIモデルから
+    最新予測を取得する。
     """
 
-    result = model.predict(
-        data
+    return model.predict(
+
+        data=data,
+
+        threshold=threshold
     )
-
-
-    return result
