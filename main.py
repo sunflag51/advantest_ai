@@ -2,16 +2,16 @@
 # アドバンテスト AI売買システム
 # main.py
 #
-# 機能
-# 1. アドバンテスト株価取得
+# 1. 株価取得
 # 2. 市場データ取得
 # 3. テクニカル分析
-# 4. AI特徴量作成
-# 5. Random Forest AI学習
+# 4. AI特徴量
+# 5. AI学習
 # 6. 最新AI予測
 # 7. 特徴量重要度
-# 8. 固定テスト期間の予測確認
+# 8. 固定80/20検証
 # 9. ウォークフォワード検証
+# 10. 正式な売買バックテスト
 #
 # ※実際の売買注文は行いません
 # ============================================================
@@ -22,15 +22,10 @@ import pandas as pd
 
 
 # ============================================================
-# 株価データ
+# データ
 # ============================================================
 
 from data.stock_data import get_stock_data
-
-
-# ============================================================
-# 市場データ
-# ============================================================
 
 from data.market_data import (
     get_all_market_data,
@@ -61,19 +56,24 @@ from ai.features import (
 
 
 # ============================================================
-# AIモデル
+# AI
 # ============================================================
 
 from ai.model import StockPredictionModel
 
 
 # ============================================================
-# ウォークフォワード検証
+# ウォークフォワード
 # ============================================================
 
-from backtest.engine import (
-    WalkForwardBacktest
-)
+from backtest.engine import WalkForwardBacktest
+
+
+# ============================================================
+# 売買バックテスト
+# ============================================================
+
+from backtest.report import BacktestReport
 
 
 # ============================================================
@@ -85,7 +85,7 @@ STOCK_NAME = "アドバンテスト"
 
 
 # ============================================================
-# Streamlit設定
+# Streamlit
 # ============================================================
 
 st.set_page_config(
@@ -104,12 +104,12 @@ st.title(
 )
 
 st.write(
-    "アドバンテスト＋市場環境＋テクニカル指標を"
-    "AIで分析します。"
+    "株価・市場環境・テクニカル指標・AIを統合して、"
+    "予測とバックテストを行います。"
 )
 
 st.caption(
-    "現在はAI分析・検証段階です。"
+    "現在は研究・検証段階です。"
     "実際の売買注文は行いません。"
 )
 
@@ -131,58 +131,28 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
 
     st.success(
-        "✅ 株価データ"
+        "✅ 株価"
     )
 
 
 with col2:
 
     st.success(
-        "✅ 市場データ"
+        "✅ 市場"
     )
 
 
 with col3:
 
     st.success(
-        "✅ テクニカル分析"
+        "🤖 AI"
     )
 
 
 with col4:
 
     st.success(
-        "🤖 AI＋検証"
-    )
-
-
-st.divider()
-
-
-# ============================================================
-# AI説明
-# ============================================================
-
-with st.expander(
-    "🤖 AIとウォークフォワード検証について"
-):
-
-    st.write(
-        "AIはアドバンテスト自身のテクニカル指標と、"
-        "日経平均・NASDAQ・SOXX・ドル円から作成した"
-        "市場特徴量を使用します。"
-    )
-
-    st.write(
-        "ウォークフォワード検証では、"
-        "その時点より過去のデータだけでAIを学習し、"
-        "その後の期間を予測します。"
-    )
-
-    st.write(
-        "一定期間進むごとにAIを再学習することで、"
-        "固定80/20分割より実運用に近い形で"
-        "予測性能を確認します。"
+        "🧪 Backtest"
     )
 
 
@@ -190,26 +160,28 @@ with st.expander(
 # 実行ボタン
 # ============================================================
 
+st.divider()
+
 st.subheader(
-    "🚀 AI分析"
+    "🚀 分析開始"
 )
 
 
 run_analysis = st.button(
-    "株価・市場・AI分析を実行",
+    "株価・市場・AI・バックテストを実行",
     type="primary",
     use_container_width=True
 )
 
 
 # ============================================================
-# 分析開始
+# 分析
 # ============================================================
 
 if run_analysis:
 
     # ========================================================
-    # ① アドバンテスト株価
+    # ① 株価
     # ========================================================
 
     st.header(
@@ -220,7 +192,7 @@ if run_analysis:
     try:
 
         with st.spinner(
-            "アドバンテストの株価を取得しています..."
+            "株価を取得しています..."
         ):
 
             stock_data = get_stock_data(
@@ -230,10 +202,7 @@ if run_analysis:
             )
 
 
-        if (
-            stock_data is None
-            or stock_data.empty
-        ):
+        if stock_data is None or stock_data.empty:
 
             st.error(
                 "株価データを取得できませんでした。"
@@ -243,17 +212,11 @@ if run_analysis:
 
 
         st.success(
-            "✅ 株価データ取得成功"
+            "✅ 株価取得成功"
         )
 
 
-        # ----------------------------------------------------
-        # 最新株価
-        # ----------------------------------------------------
-
-        latest_stock = (
-            stock_data.iloc[-1]
-        )
+        latest_stock = stock_data.iloc[-1]
 
 
         close_price = float(
@@ -277,10 +240,6 @@ if run_analysis:
         )
 
 
-        # ----------------------------------------------------
-        # 前日比
-        # ----------------------------------------------------
-
         if len(stock_data) >= 2:
 
             previous_close = float(
@@ -303,10 +262,6 @@ if run_analysis:
             change = None
             change_rate = None
 
-
-        # ----------------------------------------------------
-        # 表示
-        # ----------------------------------------------------
 
         col1, col2, col3 = st.columns(3)
 
@@ -367,11 +322,6 @@ if run_analysis:
             )
 
 
-        st.subheader(
-            "📈 株価チャート"
-        )
-
-
         st.line_chart(
             stock_data[
                 ["Close"]
@@ -382,7 +332,7 @@ if run_analysis:
     except Exception as e:
 
         st.error(
-            "❌ 株価データ取得中にエラーが発生しました。"
+            "❌ 株価取得エラー"
         )
 
         st.exception(e)
@@ -391,7 +341,7 @@ if run_analysis:
 
 
     # ========================================================
-    # ② 市場データ
+    # ② 市場
     # ========================================================
 
     st.divider()
@@ -404,21 +354,16 @@ if run_analysis:
     try:
 
         with st.spinner(
-            "日経平均・NASDAQ・SOXX・ドル円を取得しています..."
+            "市場データを取得しています..."
         ):
 
-            market_data = (
-                get_all_market_data(
-                    period="5y",
-                    interval="1d"
-                )
+            market_data = get_all_market_data(
+                period="5y",
+                interval="1d"
             )
 
-
-            latest_market = (
-                get_latest_market_values(
-                    period="5d"
-                )
+            latest_market = get_latest_market_values(
+                period="5d"
             )
 
 
@@ -427,125 +372,55 @@ if run_analysis:
         )
 
 
-        # ----------------------------------------------------
-        # 最新市場値
-        # ----------------------------------------------------
+        market_names = [
+            "日経平均",
+            "NASDAQ",
+            "SOXX",
+            "ドル円"
+        ]
 
-        col1, col2 = st.columns(2)
+
+        cols = st.columns(4)
 
 
-        with col1:
+        for i, market_name in enumerate(
+            market_names
+        ):
 
-            nikkei = latest_market.get(
-                "日経平均"
+            market_value = latest_market.get(
+                market_name
             )
 
 
-            if (
-                nikkei
-                and nikkei.get("close") is not None
-            ):
+            with cols[i]:
 
-                st.metric(
-                    "🇯🇵 日経平均",
-                    f"{nikkei['close']:,.2f}"
-                )
+                if (
+                    market_value
+                    and market_value.get(
+                        "close"
+                    ) is not None
+                ):
 
-            else:
+                    st.metric(
+                        market_name,
+                        f"{market_value['close']:,.2f}"
+                    )
 
-                st.warning(
-                    "日経平均データなし"
-                )
+                else:
 
-
-        with col2:
-
-            nasdaq = latest_market.get(
-                "NASDAQ"
-            )
-
-
-            if (
-                nasdaq
-                and nasdaq.get("close") is not None
-            ):
-
-                st.metric(
-                    "🇺🇸 NASDAQ",
-                    f"{nasdaq['close']:,.2f}"
-                )
-
-            else:
-
-                st.warning(
-                    "NASDAQデータなし"
-                )
-
-
-        col1, col2 = st.columns(2)
-
-
-        with col1:
-
-            soxx = latest_market.get(
-                "SOXX"
-            )
-
-
-            if (
-                soxx
-                and soxx.get("close") is not None
-            ):
-
-                st.metric(
-                    "💻 SOXX",
-                    f"{soxx['close']:,.2f}"
-                )
-
-            else:
-
-                st.warning(
-                    "SOXXデータなし"
-                )
-
-
-        with col2:
-
-            usd_jpy = latest_market.get(
-                "ドル円"
-            )
-
-
-            if (
-                usd_jpy
-                and usd_jpy.get("close") is not None
-            ):
-
-                st.metric(
-                    "💴 ドル円",
-                    f"{usd_jpy['close']:,.2f} 円"
-                )
-
-            else:
-
-                st.warning(
-                    "ドル円データなし"
-                )
+                    st.warning(
+                        f"{market_name} データなし"
+                    )
 
 
         # ----------------------------------------------------
-        # 市場比較チャート
+        # 市場比較
         # ----------------------------------------------------
 
         market_chart = pd.DataFrame()
 
 
-        for market_name in [
-            "日経平均",
-            "NASDAQ",
-            "SOXX",
-            "ドル円"
-        ]:
+        for market_name in market_names:
 
             if market_name not in market_data:
 
@@ -566,13 +441,10 @@ if run_analysis:
                 continue
 
 
-            series = (
-                pd.to_numeric(
-                    market_df["Close"],
-                    errors="coerce"
-                )
-                .dropna()
-            )
+            series = pd.to_numeric(
+                market_df["Close"],
+                errors="coerce"
+            ).dropna()
 
 
             if series.empty:
@@ -587,9 +459,7 @@ if run_analysis:
             )
 
 
-            normalized.name = (
-                market_name
-            )
+            normalized.name = market_name
 
 
             if market_chart.empty:
@@ -622,7 +492,7 @@ if run_analysis:
             )
 
             st.caption(
-                "各市場の表示開始時点を100として比較しています。"
+                "表示開始時点を100として比較"
             )
 
             st.line_chart(
@@ -633,7 +503,7 @@ if run_analysis:
     except Exception as e:
 
         st.error(
-            "❌ 市場データ取得中にエラーが発生しました。"
+            "❌ 市場データ取得エラー"
         )
 
         st.exception(e)
@@ -654,21 +524,13 @@ if run_analysis:
 
     try:
 
-        with st.spinner(
-            "テクニカル指標を計算しています..."
-        ):
-
-            technical_data = (
-                add_all_indicators(
-                    stock_data
-                )
-            )
+        technical_data = add_all_indicators(
+            stock_data
+        )
 
 
-        latest_indicators = (
-            get_latest_indicators(
-                technical_data
-            )
+        latest_indicators = get_latest_indicators(
+            technical_data
         )
 
 
@@ -681,121 +543,68 @@ if run_analysis:
         # 移動平均
         # ----------------------------------------------------
 
-        st.subheader(
-            "📊 移動平均"
-        )
-
-
-        sma5 = latest_indicators.get(
-            "SMA_5"
-        )
-
-        sma25 = latest_indicators.get(
-            "SMA_25"
-        )
-
-        sma75 = latest_indicators.get(
-            "SMA_75"
-        )
-
-
         col1, col2, col3 = st.columns(3)
 
 
-        with col1:
+        for column, title, container in zip(
+            [
+                "SMA_5",
+                "SMA_25",
+                "SMA_75"
+            ],
+            [
+                "5日移動平均",
+                "25日移動平均",
+                "75日移動平均"
+            ],
+            [
+                col1,
+                col2,
+                col3
+            ]
+        ):
 
-            if pd.notna(sma5):
-
-                st.metric(
-                    "5日移動平均",
-                    f"{sma5:,.0f} 円"
-                )
-
-
-        with col2:
-
-            if pd.notna(sma25):
-
-                st.metric(
-                    "25日移動平均",
-                    f"{sma25:,.0f} 円"
-                )
-
-
-        with col3:
-
-            if pd.notna(sma75):
-
-                st.metric(
-                    "75日移動平均",
-                    f"{sma75:,.0f} 円"
-                )
+            value = latest_indicators.get(
+                column
+            )
 
 
-        ma_columns = [
-            "Close",
-            "SMA_5",
-            "SMA_25",
-            "SMA_75"
-        ]
+            with container:
+
+                if pd.notna(value):
+
+                    st.metric(
+                        title,
+                        f"{value:,.0f} 円"
+                    )
 
 
-        existing_ma_columns = [
-
+        chart_columns = [
             column
-
-            for column in ma_columns
-
+            for column in [
+                "Close",
+                "SMA_5",
+                "SMA_25",
+                "SMA_75"
+            ]
             if column in technical_data.columns
         ]
 
 
         st.line_chart(
             technical_data[
-                existing_ma_columns
+                chart_columns
             ].tail(250)
         )
 
 
         # ----------------------------------------------------
-        # RSI
+        # RSI / MACD
         # ----------------------------------------------------
-
-        st.subheader(
-            "📈 RSI"
-        )
-
 
         rsi = latest_indicators.get(
             "RSI_14"
         )
-
-
-        if pd.notna(rsi):
-
-            st.metric(
-                "RSI（14日）",
-                f"{rsi:.2f}"
-            )
-
-
-        if "RSI_14" in technical_data.columns:
-
-            st.line_chart(
-                technical_data[
-                    ["RSI_14"]
-                ].tail(250)
-            )
-
-
-        # ----------------------------------------------------
-        # MACD
-        # ----------------------------------------------------
-
-        st.subheader(
-            "📉 MACD"
-        )
-
 
         macd = latest_indicators.get(
             "MACD"
@@ -805,15 +614,21 @@ if run_analysis:
             "MACD_Signal"
         )
 
-        macd_histogram = latest_indicators.get(
-            "MACD_Histogram"
-        )
-
 
         col1, col2, col3 = st.columns(3)
 
 
         with col1:
+
+            if pd.notna(rsi):
+
+                st.metric(
+                    "RSI",
+                    f"{rsi:.2f}"
+                )
+
+
+        with col2:
 
             if pd.notna(macd):
 
@@ -823,78 +638,14 @@ if run_analysis:
                 )
 
 
-        with col2:
+        with col3:
 
             if pd.notna(macd_signal):
 
                 st.metric(
-                    "シグナル",
+                    "MACD Signal",
                     f"{macd_signal:.2f}"
                 )
-
-
-        with col3:
-
-            if pd.notna(macd_histogram):
-
-                st.metric(
-                    "ヒストグラム",
-                    f"{macd_histogram:.2f}"
-                )
-
-
-        if all(
-            column in technical_data.columns
-            for column in [
-                "MACD",
-                "MACD_Signal"
-            ]
-        ):
-
-            st.line_chart(
-                technical_data[
-                    [
-                        "MACD",
-                        "MACD_Signal"
-                    ]
-                ].tail(250)
-            )
-
-
-        # ----------------------------------------------------
-        # ボリンジャーバンド
-        # ----------------------------------------------------
-
-        st.subheader(
-            "📐 ボリンジャーバンド"
-        )
-
-
-        bb_columns = [
-            "Close",
-            "BB_Upper",
-            "BB_Middle",
-            "BB_Lower"
-        ]
-
-
-        existing_bb_columns = [
-
-            column
-
-            for column in bb_columns
-
-            if column in technical_data.columns
-        ]
-
-
-        if existing_bb_columns:
-
-            st.line_chart(
-                technical_data[
-                    existing_bb_columns
-                ].tail(250)
-            )
 
 
         # ----------------------------------------------------
@@ -905,16 +656,12 @@ if run_analysis:
             "ATR_14"
         )
 
-        volume_ratio = (
-            latest_indicators.get(
-                "Volume_Ratio"
-            )
+        volume_ratio = latest_indicators.get(
+            "Volume_Ratio"
         )
 
-        volatility = (
-            latest_indicators.get(
-                "Volatility_20D"
-            )
+        volatility = latest_indicators.get(
+            "Volatility_20D"
         )
 
 
@@ -926,7 +673,7 @@ if run_analysis:
             if pd.notna(atr):
 
                 st.metric(
-                    "ATR（14日）",
+                    "ATR",
                     f"{atr:,.2f}"
                 )
 
@@ -954,7 +701,7 @@ if run_analysis:
     except Exception as e:
 
         st.error(
-            "❌ テクニカル分析中にエラーが発生しました。"
+            "❌ テクニカル分析エラー"
         )
 
         st.exception(e)
@@ -969,35 +716,25 @@ if run_analysis:
     st.divider()
 
     st.header(
-        "④ 🧠 AI特徴量作成"
+        "④ 🧠 AI特徴量"
     )
 
 
     try:
 
-        with st.spinner(
-            "アドバンテストと市場データを統合しています..."
-        ):
-
-            ai_data = (
-                build_ai_features(
-                    technical_data=technical_data,
-                    market_data=market_data
-                )
-            )
-
-
-        ai_feature_columns = (
-            get_ai_feature_columns(
-                ai_data
-            )
+        ai_data = build_ai_features(
+            technical_data=technical_data,
+            market_data=market_data
         )
 
 
-        feature_summary = (
-            get_feature_summary(
-                ai_data
-            )
+        ai_feature_columns = get_ai_feature_columns(
+            ai_data
+        )
+
+
+        feature_summary = get_feature_summary(
+            ai_data
         )
 
 
@@ -1019,8 +756,8 @@ if run_analysis:
         with col1:
 
             st.metric(
-                "AI特徴量数",
-                f"{len(ai_feature_columns)}"
+                "特徴量数",
+                len(ai_feature_columns)
             )
 
 
@@ -1028,7 +765,10 @@ if run_analysis:
 
             st.metric(
                 "データ行数",
-                f"{feature_summary.get('rows', 0):,}"
+                feature_summary.get(
+                    "rows",
+                    0
+                )
             )
 
 
@@ -1036,50 +776,25 @@ if run_analysis:
 
             st.metric(
                 "欠損値数",
-                f"{feature_summary.get('missing_values', 0):,}"
-            )
-
-
-        # ----------------------------------------------------
-        # 市場特徴量状態
-        # ----------------------------------------------------
-
-        st.subheader(
-            "🌏 AI市場特徴量"
-        )
-
-
-        market_status_rows = []
-
-
-        for market_name in [
-            "日経平均",
-            "NASDAQ",
-            "SOXX",
-            "ドル円"
-        ]:
-
-            status = (
-                market_feature_status.get(
-                    market_name,
-                    {}
+                feature_summary.get(
+                    "missing_values",
+                    0
                 )
             )
 
 
-            available = status.get(
-                "available",
-                False
+        market_rows = []
+
+
+        for market_name in market_names:
+
+            status = market_feature_status.get(
+                market_name,
+                {}
             )
 
 
-            feature_count = status.get(
-                "feature_count",
-                0
-            )
-
-
-            market_status_rows.append(
+            market_rows.append(
                 {
                     "市場":
                         market_name,
@@ -1087,45 +802,35 @@ if run_analysis:
                     "状態":
                         (
                             "✅ 使用"
-                            if available
+                            if status.get(
+                                "available",
+                                False
+                            )
                             else "⚠️ 未使用"
                         ),
 
                     "特徴量数":
-                        feature_count
+                        status.get(
+                            "feature_count",
+                            0
+                        )
                 }
             )
 
 
         st.dataframe(
             pd.DataFrame(
-                market_status_rows
+                market_rows
             ),
             use_container_width=True,
             hide_index=True
         )
 
 
-        with st.expander(
-            "AIが使用する特徴量を見る"
-        ):
-
-            st.dataframe(
-                pd.DataFrame(
-                    {
-                        "特徴量":
-                            ai_feature_columns
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-
-
     except Exception as e:
 
         st.error(
-            "❌ AI特徴量作成中にエラーが発生しました。"
+            "❌ AI特徴量作成エラー"
         )
 
         st.exception(e)
@@ -1134,7 +839,7 @@ if run_analysis:
 
 
     # ========================================================
-    # ⑤ AIモデル
+    # ⑤ AI学習
     # ========================================================
 
     st.divider()
@@ -1146,71 +851,22 @@ if run_analysis:
 
     try:
 
-        ai_model = (
-            StockPredictionModel()
-        )
+        ai_model = StockPredictionModel()
 
 
         with st.spinner(
-            "市場データを含めてAIを学習しています..."
+            "AIを学習しています..."
         ):
 
-            metrics = (
-                ai_model.train(
-                    data=ai_data,
-                    feature_columns=ai_feature_columns,
-                    train_ratio=0.8
-                )
+            metrics = ai_model.train(
+                data=ai_data,
+                feature_columns=ai_feature_columns,
+                train_ratio=0.8
             )
 
 
         st.success(
             "✅ AI学習完了"
-        )
-
-
-        # ----------------------------------------------------
-        # AI学習情報
-        # ----------------------------------------------------
-
-        st.subheader(
-            "🧠 AI学習情報"
-        )
-
-
-        col1, col2, col3 = st.columns(3)
-
-
-        with col1:
-
-            st.metric(
-                "使用特徴量",
-                f"{metrics.get('feature_count', 0)} 個"
-            )
-
-
-        with col2:
-
-            st.metric(
-                "学習データ",
-                f"{metrics.get('train_samples', 0):,} 件"
-            )
-
-
-        with col3:
-
-            st.metric(
-                "テストデータ",
-                f"{metrics.get('test_samples', 0):,} 件"
-            )
-
-
-        # ----------------------------------------------------
-        # 固定テスト評価
-        # ----------------------------------------------------
-
-        st.subheader(
-            "📊 固定80/20検証"
         )
 
 
@@ -1254,109 +910,57 @@ if run_analysis:
 
         with col2:
 
-            fixed_auc = metrics.get(
+            auc = metrics.get(
                 "auc"
             )
 
-
-            if fixed_auc is not None:
-
-                st.metric(
-                    "AUC",
-                    f"{fixed_auc:.3f}"
+            st.metric(
+                "AUC",
+                (
+                    f"{auc:.3f}"
+                    if auc is not None
+                    else "計算不可"
                 )
-
-            else:
-
-                st.metric(
-                    "AUC",
-                    "計算不可"
-                )
-
-
-        # ----------------------------------------------------
-        # 混同行列
-        # ----------------------------------------------------
-
-        confusion_df = pd.DataFrame(
-            [
-                {
-                    "項目": "下落を正しく予測",
-                    "件数": metrics.get(
-                        "true_negative",
-                        0
-                    )
-                },
-                {
-                    "項目": "上昇と誤予測",
-                    "件数": metrics.get(
-                        "false_positive",
-                        0
-                    )
-                },
-                {
-                    "項目": "下落と誤予測",
-                    "件数": metrics.get(
-                        "false_negative",
-                        0
-                    )
-                },
-                {
-                    "項目": "上昇を正しく予測",
-                    "件数": metrics.get(
-                        "true_positive",
-                        0
-                    )
-                }
-            ]
-        )
-
-
-        st.dataframe(
-            confusion_df,
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-        # ====================================================
-        # ⑥ 最新AI予測
-        # ====================================================
-
-        st.divider()
-
-        st.header(
-            "⑥ 🔮 最新AI予測"
-        )
-
-
-        prediction = (
-            ai_model.predict(
-                data=ai_data,
-                threshold=0.50
             )
+
+
+    except Exception as e:
+
+        st.error(
+            "❌ AI学習エラー"
+        )
+
+        st.exception(e)
+
+        st.stop()
+
+
+    # ========================================================
+    # ⑥ 最新AI予測
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "⑥ 🔮 最新AI予測"
+    )
+
+
+    try:
+
+        prediction = ai_model.predict(
+            ai_data,
+            threshold=0.50
         )
 
 
-        probability_up = (
-            prediction[
-                "probability_up"
-            ]
-        )
+        probability_up = prediction[
+            "probability_up"
+        ]
 
-
-        probability_down = (
-            prediction[
-                "probability_down"
-            ]
-        )
-
-
-        prediction_text = (
-            prediction[
-                "prediction_text"
-            ]
-        )
+        probability_down = prediction[
+            "probability_down"
+        ]
 
 
         col1, col2 = st.columns(2)
@@ -1365,7 +969,7 @@ if run_analysis:
         with col1:
 
             st.metric(
-                "📈 翌営業日の上昇確率",
+                "📈 上昇確率",
                 f"{probability_up * 100:.2f}%"
             )
 
@@ -1373,14 +977,9 @@ if run_analysis:
         with col2:
 
             st.metric(
-                "📉 翌営業日の下落確率",
+                "📉 下落確率",
                 f"{probability_down * 100:.2f}%"
             )
-
-
-        st.write(
-            "上昇確率"
-        )
 
 
         st.progress(
@@ -1394,7 +993,9 @@ if run_analysis:
         )
 
 
-        if prediction_text == "上昇":
+        if prediction[
+            "prediction_text"
+        ] == "上昇":
 
             st.success(
                 "AI方向予測：上昇側"
@@ -1407,447 +1008,274 @@ if run_analysis:
             )
 
 
-        st.caption(
-            "50%は方向分類の境界です。"
-            "現段階では売買シグナルではありません。"
+    except Exception as e:
+
+        st.error(
+            "❌ 最新AI予測エラー"
         )
 
+        st.exception(e)
 
-        # ====================================================
-        # ⑦ 特徴量重要度
-        # ====================================================
-
-        st.divider()
-
-        st.header(
-            "⑦ 🔍 AIが重視した特徴量"
-        )
+        st.stop()
 
 
-        importance = (
-            ai_model
-            .get_feature_importance()
-        )
+    # ========================================================
+    # ⑦ 特徴量重要度
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "⑦ 🔍 AI特徴量重要度"
+    )
 
 
-        importance_display = (
-            importance.copy()
-        )
+    importance = ai_model.get_feature_importance()
 
 
-        importance_display[
-            "importance"
+    importance_display = importance.copy()
+
+
+    importance_display[
+        "importance"
+    ] *= 100
+
+
+    importance_display.rename(
+        columns={
+            "feature":
+                "特徴量",
+
+            "importance":
+                "重要度（%）"
+        },
+        inplace=True
+    )
+
+
+    top_importance = (
+        importance_display
+        .head(15)
+    )
+
+
+    st.dataframe(
+        top_importance,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+    st.bar_chart(
+        top_importance
+        .set_index(
+            "特徴量"
+        )[
+            ["重要度（%）"]
+        ]
+    )
+
+
+    # ========================================================
+    # ⑧ 固定80/20テスト
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "⑧ 📋 固定80/20テスト"
+    )
+
+
+    test_results = ai_model.get_test_results()
+
+
+    if (
+        test_results is not None
+        and not test_results.empty
+    ):
+
+        display_test = test_results.copy()
+
+
+        display_test[
+            "上昇確率（%）"
         ] = (
-            importance_display[
-                "importance"
+            display_test[
+                "Probability_Up"
             ]
             * 100
         )
 
 
-        importance_display.rename(
-            columns={
-                "feature":
-                    "特徴量",
-
-                "importance":
-                    "重要度（%）"
-            },
-            inplace=True
+        display_test[
+            "実際"
+        ] = (
+            display_test[
+                "Actual"
+            ]
+            .map(
+                {
+                    1: "上昇",
+                    0: "下落"
+                }
+            )
         )
 
 
-        top_importance = (
-            importance_display
-            .head(15)
-            .copy()
+        display_test[
+            "AI予測"
+        ] = (
+            display_test[
+                "Prediction"
+            ]
+            .map(
+                {
+                    1: "上昇",
+                    0: "下落"
+                }
+            )
         )
 
 
         st.dataframe(
-            top_importance,
-            use_container_width=True,
-            hide_index=True
+            display_test[
+                [
+                    "実際",
+                    "AI予測",
+                    "上昇確率（%）"
+                ]
+            ].tail(50),
+            use_container_width=True
         )
 
 
-        st.bar_chart(
-            top_importance
-            .set_index(
-                "特徴量"
-            )[
-                ["重要度（%）"]
-            ]
-        )
+    # ========================================================
+    # ⑨ ウォークフォワード検証
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "⑨ 🔄 ウォークフォワード検証"
+    )
 
 
-        # ====================================================
-        # ⑧ 固定テスト期間結果
-        # ====================================================
+    try:
 
-        st.divider()
-
-        st.header(
-            "⑧ 📋 固定テスト期間の予測"
-        )
-
-
-        test_results = (
-            ai_model
-            .get_test_results()
-        )
-
-
-        if (
-            test_results is not None
-            and not test_results.empty
+        with st.spinner(
+            "ウォークフォワード検証中..."
         ):
 
-            display_test = (
-                test_results.copy()
+            walk_forward = WalkForwardBacktest(
+                initial_train_size=500,
+                test_size=20,
+                retrain_every=20,
+                threshold=0.50
             )
 
 
-            display_test[
-                "上昇確率（%）"
-            ] = (
-                display_test[
-                    "Probability_Up"
-                ]
-                * 100
+            (
+                walk_results,
+                walk_metrics
+            ) = walk_forward.run(
+                data=ai_data,
+                feature_columns=ai_feature_columns
             )
 
 
-            display_test[
-                "実際"
-            ] = (
-                display_test[
-                    "Actual"
-                ]
-                .map(
-                    {
-                        1: "上昇",
-                        0: "下落"
-                    }
-                )
-            )
-
-
-            display_test[
-                "AI予測"
-            ] = (
-                display_test[
-                    "Prediction"
-                ]
-                .map(
-                    {
-                        1: "上昇",
-                        0: "下落"
-                    }
-                )
-            )
-
-
-            display_test[
-                "正解"
-            ] = (
-                display_test[
-                    "Actual"
-                ]
-                ==
-                display_test[
-                    "Prediction"
-                ]
-            )
-
-
-            display_test[
-                "正解"
-            ] = (
-                display_test[
-                    "正解"
-                ]
-                .map(
-                    {
-                        True: "○",
-                        False: "×"
-                    }
-                )
-            )
-
-
-            st.dataframe(
-                display_test[
-                    [
-                        "実際",
-                        "AI予測",
-                        "上昇確率（%）",
-                        "正解"
-                    ]
-                ].tail(50),
-                use_container_width=True
-            )
-
-
-        # ====================================================
-        # ⑨ ウォークフォワード検証
-        # ====================================================
-
-        st.divider()
-
-        st.header(
-            "⑨ 🔄 ウォークフォワード検証"
+        st.success(
+            "✅ ウォークフォワード検証完了"
         )
 
 
-        st.write(
-            "過去のデータだけでAIを学習し、"
-            "その後の期間を予測する処理を"
-            "時間を進めながら繰り返します。"
-        )
+        col1, col2, col3 = st.columns(3)
 
 
-        st.caption(
-            "初期学習500営業日・20営業日ごとに再学習・"
-            "判定基準50%で検証します。"
-        )
+        with col1:
+
+            st.metric(
+                "Accuracy",
+                f"{walk_metrics.get('accuracy', 0) * 100:.2f}%"
+            )
 
 
-        try:
+        with col2:
 
-            with st.spinner(
-                "ウォークフォワード検証を実行しています..."
-            ):
+            walk_auc = walk_metrics.get(
+                "auc"
+            )
 
-                walk_forward = (
-                    WalkForwardBacktest(
-                        initial_train_size=500,
-                        test_size=20,
-                        retrain_every=20,
-                        threshold=0.50
-                    )
-                )
-
-
+            st.metric(
+                "AUC",
                 (
-                    walk_results,
-                    walk_metrics
-                ) = walk_forward.run(
-                    data=ai_data,
-                    feature_columns=ai_feature_columns
-                )
-
-
-            st.success(
-                "✅ ウォークフォワード検証完了"
-            )
-
-
-            # ================================================
-            # 基本情報
-            # ================================================
-
-            st.subheader(
-                "🧪 検証情報"
-            )
-
-
-            col1, col2, col3 = st.columns(3)
-
-
-            with col1:
-
-                st.metric(
-                    "検証営業日",
-                    f"{walk_metrics.get('samples', 0):,} 日"
-                )
-
-
-            with col2:
-
-                st.metric(
-                    "AI再学習回数",
-                    f"{walk_metrics.get('model_count', 0):,} 回"
-                )
-
-
-            with col3:
-
-                st.metric(
-                    "判定基準",
-                    f"{walk_metrics.get('threshold', 0.5) * 100:.0f}%"
-                )
-
-
-            # ================================================
-            # 評価指標
-            # ================================================
-
-            st.subheader(
-                "📊 ウォークフォワードAI評価"
-            )
-
-
-            col1, col2, col3 = st.columns(3)
-
-
-            with col1:
-
-                st.metric(
-                    "Accuracy",
-                    f"{walk_metrics.get('accuracy', 0) * 100:.2f}%"
-                )
-
-
-            with col2:
-
-                st.metric(
-                    "Precision",
-                    f"{walk_metrics.get('precision', 0) * 100:.2f}%"
-                )
-
-
-            with col3:
-
-                st.metric(
-                    "Recall",
-                    f"{walk_metrics.get('recall', 0) * 100:.2f}%"
-                )
-
-
-            col1, col2 = st.columns(2)
-
-
-            with col1:
-
-                st.metric(
-                    "F1",
-                    f"{walk_metrics.get('f1', 0) * 100:.2f}%"
-                )
-
-
-            with col2:
-
-                walk_auc = (
-                    walk_metrics.get(
-                        "auc"
-                    )
-                )
-
-
-                if walk_auc is not None:
-
-                    st.metric(
-                        "AUC",
-                        f"{walk_auc:.3f}"
-                    )
-
-                else:
-
-                    st.metric(
-                        "AUC",
-                        "計算不可"
-                    )
-
-
-            # ================================================
-            # 上昇割合
-            # ================================================
-
-            st.subheader(
-                "📈 予測傾向"
-            )
-
-
-            actual_up_rate = (
-                walk_metrics.get(
-                    "actual_up_rate",
-                    0
+                    f"{walk_auc:.3f}"
+                    if walk_auc is not None
+                    else "計算不可"
                 )
             )
 
 
-            predicted_up_rate = (
-                walk_metrics.get(
-                    "predicted_up_rate",
-                    0
-                )
+        with col3:
+
+            st.metric(
+                "検証営業日",
+                f"{walk_metrics.get('samples', 0):,}"
             )
 
 
-            col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
 
-            with col1:
+        with col1:
 
-                st.metric(
-                    "実際の上昇日割合",
-                    f"{actual_up_rate * 100:.2f}%"
-                )
-
-
-            with col2:
-
-                st.metric(
-                    "AIが上昇と予測した割合",
-                    f"{predicted_up_rate * 100:.2f}%"
-                )
-
-
-            # ================================================
-            # 予測方向別リターン
-            # ================================================
-
-            st.subheader(
-                "💹 予測方向と翌日リターン"
+            st.metric(
+                "Precision",
+                f"{walk_metrics.get('precision', 0) * 100:.2f}%"
             )
 
 
-            average_return_when_up = (
-                walk_metrics.get(
-                    "average_return_when_up",
-                    0
-                )
+        with col2:
+
+            st.metric(
+                "Recall",
+                f"{walk_metrics.get('recall', 0) * 100:.2f}%"
             )
 
 
-            average_return_when_down = (
-                walk_metrics.get(
-                    "average_return_when_down",
-                    0
-                )
+        with col3:
+
+            st.metric(
+                "F1",
+                f"{walk_metrics.get('f1', 0) * 100:.2f}%"
             )
 
 
-            col1, col2 = st.columns(2)
+        # ----------------------------------------------------
+        # 60%以上
+        # ----------------------------------------------------
+
+        st.subheader(
+            "🎯 上昇確率60%以上"
+        )
 
 
-            with col1:
+        high_accuracy = walk_metrics.get(
+            "high_confidence_accuracy"
+        )
 
-                st.metric(
-                    "上昇予測日の平均翌日リターン",
-                    f"{average_return_when_up * 100:+.3f}%"
-                )
-
-
-            with col2:
-
-                st.metric(
-                    "下落予測日の平均翌日リターン",
-                    f"{average_return_when_down * 100:+.3f}%"
-                )
+        high_return = walk_metrics.get(
+            "high_confidence_return"
+        )
 
 
-            # ================================================
-            # 60%以上の高確率予測
-            # ================================================
-
-            st.subheader(
-                "🎯 上昇確率60%以上"
-            )
+        col1, col2, col3 = st.columns(3)
 
 
-            high_samples = (
+        with col1:
+
+            st.metric(
+                "予測回数",
                 walk_metrics.get(
                     "high_confidence_samples",
                     0
@@ -1855,386 +1283,719 @@ if run_analysis:
             )
 
 
-            high_accuracy = (
-                walk_metrics.get(
-                    "high_confidence_accuracy"
+        with col2:
+
+            st.metric(
+                "正解率",
+                (
+                    f"{high_accuracy * 100:.2f}%"
+                    if high_accuracy is not None
+                    else "データなし"
                 )
             )
 
 
-            high_return = (
-                walk_metrics.get(
-                    "high_confidence_return"
+        with col3:
+
+            st.metric(
+                "平均翌日リターン",
+                (
+                    f"{high_return * 100:+.3f}%"
+                    if high_return is not None
+                    else "データなし"
                 )
             )
 
 
-            col1, col2, col3 = st.columns(3)
+        # ----------------------------------------------------
+        # 確率チャート
+        # ----------------------------------------------------
+
+        probability_chart = walk_results[
+            ["Probability_Up"]
+        ].copy()
 
 
-            with col1:
-
-                st.metric(
-                    "予測回数",
-                    f"{high_samples:,} 回"
-                )
+        probability_chart[
+            "Probability_Up"
+        ] *= 100
 
 
-            with col2:
-
-                if high_accuracy is not None:
-
-                    st.metric(
-                        "正解率",
-                        f"{high_accuracy * 100:.2f}%"
-                    )
-
-                else:
-
-                    st.metric(
-                        "正解率",
-                        "データなし"
-                    )
+        probability_chart.rename(
+            columns={
+                "Probability_Up":
+                    "上昇確率（%）"
+            },
+            inplace=True
+        )
 
 
-            with col3:
-
-                if high_return is not None:
-
-                    st.metric(
-                        "平均翌日リターン",
-                        f"{high_return * 100:+.3f}%"
-                    )
-
-                else:
-
-                    st.metric(
-                        "平均翌日リターン",
-                        "データなし"
-                    )
+        st.line_chart(
+            probability_chart
+        )
 
 
-            # ================================================
-            # 混同行列
-            # ================================================
+        with st.expander(
+            "ウォークフォワード予測を見る"
+        ):
 
-            st.subheader(
-                "📋 ウォークフォワード予測内訳"
-            )
+            walk_display = walk_results.copy()
 
 
-            walk_confusion_df = (
-                pd.DataFrame(
-                    [
-                        {
-                            "項目":
-                                "下落を正しく予測",
-
-                            "件数":
-                                walk_metrics.get(
-                                    "true_negative",
-                                    0
-                                )
-                        },
-
-                        {
-                            "項目":
-                                "上昇と誤予測",
-
-                            "件数":
-                                walk_metrics.get(
-                                    "false_positive",
-                                    0
-                                )
-                        },
-
-                        {
-                            "項目":
-                                "下落と誤予測",
-
-                            "件数":
-                                walk_metrics.get(
-                                    "false_negative",
-                                    0
-                                )
-                        },
-
-                        {
-                            "項目":
-                                "上昇を正しく予測",
-
-                            "件数":
-                                walk_metrics.get(
-                                    "true_positive",
-                                    0
-                                )
-                        }
-                    ]
-                )
-            )
-
-
-            st.dataframe(
-                walk_confusion_df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-            # ================================================
-            # 上昇確率チャート
-            # ================================================
-
-            st.subheader(
-                "📈 AI上昇確率の推移"
-            )
-
-
-            probability_chart = (
-                walk_results[
-                    [
-                        "Probability_Up"
-                    ]
-                ].copy()
-            )
-
-
-            probability_chart[
-                "Probability_Up"
+            walk_display[
+                "上昇確率（%）"
             ] = (
-                probability_chart[
+                walk_display[
                     "Probability_Up"
                 ]
                 * 100
             )
 
 
-            probability_chart.rename(
+            walk_display[
+                "翌日騰落率（%）"
+            ] = (
+                walk_display[
+                    "Next_Return"
+                ]
+                * 100
+            )
+
+
+            st.dataframe(
+                walk_display[
+                    [
+                        "Close",
+                        "Next_Close",
+                        "Probability_Up",
+                        "上昇確率（%）",
+                        "翌日騰落率（%）",
+                        "Correct"
+                    ]
+                ].tail(50),
+                use_container_width=True
+            )
+
+
+    except Exception as e:
+
+        st.error(
+            "❌ ウォークフォワード検証エラー"
+        )
+
+        st.exception(e)
+
+        st.stop()
+
+
+    # ========================================================
+    # ⑩ 正式な売買バックテスト
+    # ========================================================
+
+    st.divider()
+
+    st.header(
+        "⑩ 💰 正式な売買バックテスト"
+    )
+
+
+    st.write(
+        "ウォークフォワードAIの上昇確率が60%以上の場合、"
+        "次の営業日の寄り付きで購入し、"
+        "その日の終値で売却したと仮定します。"
+    )
+
+
+    st.caption(
+        "初期資金100万円 / 100株単位 / "
+        "売買手数料0.1% / スリッページ0.1%"
+    )
+
+
+    try:
+
+        with st.spinner(
+            "売買バックテストを実行しています..."
+        ):
+
+            backtest_report = BacktestReport(
+                initial_capital=1_000_000,
+                lot_size=100,
+                entry_threshold=0.60,
+                commission_rate=0.001,
+                slippage_rate=0.001
+            )
+
+
+            (
+                trades,
+                equity_curve,
+                backtest_metrics
+            ) = backtest_report.run(
+                stock_data=stock_data,
+                walk_results=walk_results
+            )
+
+
+        st.success(
+            "✅ 売買バックテスト完了"
+        )
+
+
+        # ====================================================
+        # 資産結果
+        # ====================================================
+
+        st.subheader(
+            "💴 資産結果"
+        )
+
+
+        initial_capital = backtest_metrics.get(
+            "initial_capital",
+            0
+        )
+
+        final_capital = backtest_metrics.get(
+            "final_capital",
+            0
+        )
+
+        total_profit = backtest_metrics.get(
+            "total_profit",
+            0
+        )
+
+        total_return = backtest_metrics.get(
+            "total_return",
+            0
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "初期資金",
+                f"{initial_capital:,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "最終資産",
+                f"{final_capital:,.0f} 円",
+                delta=(
+                    f"{total_profit:+,.0f} 円"
+                )
+            )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "総損益",
+                f"{total_profit:+,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "総リターン",
+                f"{total_return * 100:+.2f}%"
+            )
+
+
+        # ====================================================
+        # 取引成績
+        # ====================================================
+
+        st.subheader(
+            "📊 取引成績"
+        )
+
+
+        trade_count = backtest_metrics.get(
+            "trades",
+            0
+        )
+
+        wins = backtest_metrics.get(
+            "wins",
+            0
+        )
+
+        losses = backtest_metrics.get(
+            "losses",
+            0
+        )
+
+        win_rate = backtest_metrics.get(
+            "win_rate"
+        )
+
+
+        col1, col2, col3, col4 = st.columns(4)
+
+
+        with col1:
+
+            st.metric(
+                "取引回数",
+                f"{trade_count:,}"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "勝ち",
+                f"{wins:,}"
+            )
+
+
+        with col3:
+
+            st.metric(
+                "負け",
+                f"{losses:,}"
+            )
+
+
+        with col4:
+
+            st.metric(
+                "勝率",
+                (
+                    f"{win_rate * 100:.2f}%"
+                    if win_rate is not None
+                    else "取引なし"
+                )
+            )
+
+
+        # ====================================================
+        # リスク / 効率
+        # ====================================================
+
+        st.subheader(
+            "⚖️ リスク・効率"
+        )
+
+
+        profit_factor = backtest_metrics.get(
+            "profit_factor"
+        )
+
+        max_drawdown = backtest_metrics.get(
+            "max_drawdown",
+            0
+        )
+
+        average_profit = backtest_metrics.get(
+            "average_profit"
+        )
+
+        average_profit_rate = (
+            backtest_metrics.get(
+                "average_profit_rate"
+            )
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "Profit Factor",
+                (
+                    f"{profit_factor:.3f}"
+                    if profit_factor is not None
+                    else "計算不可"
+                )
+            )
+
+
+        with col2:
+
+            st.metric(
+                "最大ドローダウン",
+                f"{max_drawdown * 100:.2f}%"
+            )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "1取引平均損益",
+                (
+                    f"{average_profit:+,.0f} 円"
+                    if average_profit is not None
+                    else "取引なし"
+                )
+            )
+
+
+        with col2:
+
+            st.metric(
+                "1取引平均リターン",
+                (
+                    f"{average_profit_rate * 100:+.3f}%"
+                    if average_profit_rate is not None
+                    else "取引なし"
+                )
+            )
+
+
+        # ====================================================
+        # ベスト / ワースト
+        # ====================================================
+
+        if trade_count > 0:
+
+            best_trade = backtest_metrics.get(
+                "best_trade",
+                0
+            )
+
+            worst_trade = backtest_metrics.get(
+                "worst_trade",
+                0
+            )
+
+
+            col1, col2 = st.columns(2)
+
+
+            with col1:
+
+                st.metric(
+                    "最大1取引利益",
+                    f"{best_trade:+,.0f} 円"
+                )
+
+
+            with col2:
+
+                st.metric(
+                    "最大1取引損失",
+                    f"{worst_trade:+,.0f} 円"
+                )
+
+
+        # ====================================================
+        # 取引コスト
+        # ====================================================
+
+        st.subheader(
+            "💸 取引コスト"
+        )
+
+
+        total_commission = (
+            backtest_metrics.get(
+                "total_commission",
+                0
+            )
+        )
+
+        total_slippage = (
+            backtest_metrics.get(
+                "total_slippage",
+                0
+            )
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "総手数料",
+                f"{total_commission:,.0f} 円"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "推定スリッページ",
+                f"{total_slippage:,.0f} 円"
+            )
+
+
+        # ====================================================
+        # Buy & Hold比較
+        # ====================================================
+
+        st.subheader(
+            "📈 AI戦略 vs Buy & Hold"
+        )
+
+
+        buy_hold_return = (
+            backtest_metrics.get(
+                "buy_hold_return"
+            )
+        )
+
+        excess_return = (
+            backtest_metrics.get(
+                "excess_return"
+            )
+        )
+
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            st.metric(
+                "Buy & Hold",
+                (
+                    f"{buy_hold_return * 100:+.2f}%"
+                    if buy_hold_return is not None
+                    else "計算不可"
+                )
+            )
+
+
+        with col2:
+
+            st.metric(
+                "AI戦略との差",
+                (
+                    f"{excess_return * 100:+.2f}%"
+                    if excess_return is not None
+                    else "計算不可"
+                )
+            )
+
+
+        # ----------------------------------------------------
+        # 資産曲線
+        # ----------------------------------------------------
+
+        comparison_curve = (
+            backtest_report
+            .get_comparison_curve()
+        )
+
+
+        if (
+            comparison_curve is not None
+            and not comparison_curve.empty
+        ):
+
+            comparison_display = (
+                comparison_curve.copy()
+            )
+
+
+            comparison_display.rename(
                 columns={
-                    "Probability_Up":
-                        "上昇確率（%）"
+                    "AI_Strategy":
+                        "AI戦略",
+
+                    "BuyHold_Equity":
+                        "Buy & Hold"
                 },
                 inplace=True
             )
 
 
             st.line_chart(
-                probability_chart
+                comparison_display
             )
 
 
-            # ================================================
-            # 累積翌日リターン参考表示
-            #
-            # Prediction == 1 の日の翌日リターンを
-            # 単純累積した参考値
-            #
-            # まだ正式な売買バックテストではない
-            # ================================================
+        # ====================================================
+        # ドローダウン
+        # ====================================================
 
-            strategy_reference = (
-                walk_results.copy()
-            )
-
-
-            strategy_reference[
-                "AI参考リターン"
-            ] = (
-                strategy_reference[
-                    "Next_Return"
-                ]
-                *
-                strategy_reference[
-                    "Prediction"
-                ]
-            )
-
-
-            strategy_reference[
-                "AI参考資産指数"
-            ] = (
-                (
-                    1
-                    +
-                    strategy_reference[
-                        "AI参考リターン"
-                    ]
-                )
-                .cumprod()
-                * 100
-            )
-
-
-            strategy_reference[
-                "BuyHold参考指数"
-            ] = (
-                (
-                    1
-                    +
-                    strategy_reference[
-                        "Next_Return"
-                    ]
-                )
-                .cumprod()
-                * 100
-            )
-
+        if (
+            equity_curve is not None
+            and not equity_curve.empty
+            and "Drawdown" in equity_curve.columns
+        ):
 
             st.subheader(
-                "📊 参考：AI予測とBuy & Hold"
+                "📉 ドローダウン"
             )
 
 
-            st.caption(
-                "これは売買手数料・スリッページ・"
-                "翌日寄り付き約定などをまだ考慮していない"
-                "参考表示です。正式な売買バックテストではありません。"
+            drawdown_chart = (
+                equity_curve[
+                    ["Drawdown"]
+                ].copy()
+            )
+
+
+            drawdown_chart[
+                "Drawdown"
+            ] *= 100
+
+
+            drawdown_chart.rename(
+                columns={
+                    "Drawdown":
+                        "ドローダウン（%）"
+                },
+                inplace=True
             )
 
 
             st.line_chart(
-                strategy_reference[
-                    [
-                        "AI参考資産指数",
-                        "BuyHold参考指数"
-                    ]
+                drawdown_chart
+            )
+
+
+        # ====================================================
+        # 取引履歴
+        # ====================================================
+
+        st.subheader(
+            "📋 取引履歴"
+        )
+
+
+        if (
+            trades is None
+            or trades.empty
+        ):
+
+            st.warning(
+                "条件を満たす取引がありませんでした。"
+            )
+
+        else:
+
+            trade_display = trades.copy()
+
+
+            trade_display[
+                "上昇確率（%）"
+            ] = (
+                trade_display[
+                    "Probability_Up"
                 ]
+                * 100
             )
 
 
-            # ================================================
-            # 最新50件
-            # ================================================
-
-            with st.expander(
-                "ウォークフォワード予測の最新50件を見る"
-            ):
-
-                walk_display = (
-                    walk_results.copy()
-                )
-
-
-                walk_display[
-                    "上昇確率（%）"
-                ] = (
-                    walk_display[
-                        "Probability_Up"
-                    ]
-                    * 100
-                )
-
-
-                walk_display[
-                    "翌日騰落率（%）"
-                ] = (
-                    walk_display[
-                        "Next_Return"
-                    ]
-                    * 100
-                )
-
-
-                walk_display[
-                    "実際"
-                ] = (
-                    walk_display[
-                        "Actual"
-                    ]
-                    .map(
-                        {
-                            1: "上昇",
-                            0: "下落"
-                        }
-                    )
-                )
-
-
-                walk_display[
-                    "AI予測"
-                ] = (
-                    walk_display[
-                        "Prediction"
-                    ]
-                    .map(
-                        {
-                            1: "上昇",
-                            0: "下落"
-                        }
-                    )
-                )
-
-
-                walk_display[
-                    "正解"
-                ] = (
-                    walk_display[
-                        "Correct"
-                    ]
-                    .map(
-                        {
-                            1: "○",
-                            0: "×"
-                        }
-                    )
-                )
-
-
-                st.dataframe(
-                    walk_display[
-                        [
-                            "Close",
-                            "Next_Close",
-                            "実際",
-                            "AI予測",
-                            "上昇確率（%）",
-                            "翌日騰落率（%）",
-                            "正解"
-                        ]
-                    ].tail(50),
-                    use_container_width=True
-                )
-
-
-            # ================================================
-            # 再学習履歴
-            # ================================================
-
-            with st.expander(
-                "AI再学習履歴を見る"
-            ):
-
-                training_log = (
-                    walk_forward
-                    .get_training_log()
-                )
-
-
-                st.dataframe(
-                    training_log,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-
-            st.success(
-                "🎉 ウォークフォワード検証まで正常に完了しました。"
+            trade_display[
+                "損益率（%）"
+            ] = (
+                trade_display[
+                    "Profit_Rate"
+                ]
+                * 100
             )
 
 
-        except Exception as e:
-
-            st.error(
-                "❌ ウォークフォワード検証中にエラーが発生しました。"
+            trade_display[
+                "勝敗"
+            ] = (
+                trade_display[
+                    "Win"
+                ]
+                .map(
+                    {
+                        True: "勝ち",
+                        False: "負け"
+                    }
+                )
             )
 
-            st.exception(e)
+
+            st.dataframe(
+                trade_display[
+                    [
+                        "Signal_Date",
+                        "Trade_Date",
+                        "上昇確率（%）",
+                        "Open",
+                        "Buy_Price",
+                        "Close",
+                        "Sell_Price",
+                        "Shares",
+                        "Profit",
+                        "損益率（%）",
+                        "勝敗",
+                        "Capital_After"
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True
+            )
+
+
+        # ====================================================
+        # バックテスト条件
+        # ====================================================
+
+        with st.expander(
+            "バックテスト条件を見る"
+        ):
+
+            st.write(
+                "初期資金：1,000,000円"
+            )
+
+            st.write(
+                "売買単位：100株"
+            )
+
+            st.write(
+                "AIエントリー基準：上昇確率60%以上"
+            )
+
+            st.write(
+                "購入：シグナル翌営業日の寄り付き"
+            )
+
+            st.write(
+                "売却：購入日の終値"
+            )
+
+            st.write(
+                "手数料：片道0.1%"
+            )
+
+            st.write(
+                "スリッページ：片道0.1%"
+            )
+
+            st.write(
+                "信用取引：使用しない"
+            )
+
+
+        st.success(
+            "🎉 正式な売買バックテストまで正常に完了しました。"
+        )
 
 
     except Exception as e:
 
         st.error(
-            "❌ AIモデル実行中にエラーが発生しました。"
+            "❌ 売買バックテスト中にエラーが発生しました。"
         )
 
         st.exception(e)
@@ -2253,10 +2014,7 @@ st.subheader(
 
 development_status = {
 
-    "Streamlit画面":
-        "✅ 完了",
-
-    "アドバンテスト株価":
+    "株価データ":
         "✅ 完了",
 
     "市場データ":
@@ -2278,15 +2036,15 @@ development_status = {
         "✅ 完了",
 
     "ウォークフォワード検証":
+        "✅ 完了",
+
+    "売買バックテスト":
         "✅ 今回追加",
 
-    "正式な売買バックテスト":
+    "エントリー戦略":
         "🔵 次の段階",
 
-    "エントリー判断":
-        "🔵 未実装",
-
-    "売却判断":
+    "売却戦略":
         "🔵 未実装",
 
     "リスク管理":
@@ -2295,24 +2053,21 @@ development_status = {
     "ペーパートレード":
         "🔵 未実装",
 
-    "自動売買":
+    "実注文":
         "⚪ OFF"
 }
 
 
-status_df = pd.DataFrame(
-    list(
-        development_status.items()
-    ),
-    columns=[
-        "機能",
-        "状態"
-    ]
-)
-
-
 st.dataframe(
-    status_df,
+    pd.DataFrame(
+        list(
+            development_status.items()
+        ),
+        columns=[
+            "機能",
+            "状態"
+        ]
+    ),
     use_container_width=True,
     hide_index=True
 )
@@ -2325,16 +2080,16 @@ st.dataframe(
 st.divider()
 
 st.caption(
-    "AI予測は過去データを使った統計的予測であり、"
-    "将来の株価上昇や利益を保証するものではありません。"
+    "AI予測・ウォークフォワード検証・バックテストは、"
+    "将来の利益を保証するものではありません。"
 )
 
 st.caption(
-    "ウォークフォワード検証結果も、"
-    "実際の取引結果を保証するものではありません。"
+    "バックテストの手数料・スリッページは仮定値です。"
+    "実際の証券会社の条件とは異なる場合があります。"
 )
 
 st.caption(
-    "現在は検証段階です。"
+    "現在は検証段階であり、"
     "実際の売買注文は一切行いません。"
 )
