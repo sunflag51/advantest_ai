@@ -2,20 +2,16 @@
 # アドバンテスト AI売買システム
 # backtest/trading_engine.py
 #
-# 本格戦略バックテストエンジン
+# 本格戦略バックテストエンジン 改良完全版
 #
-# 流れ
-# 1. ウォークフォワードAI予測を読む
-# 2. EntryStrategyでBUY判定
-# 3. 翌営業日の始値で購入
-# 4. RiskManagerで購入株数を決定
-# 5. ポジションを保有
-# 6. ExitStrategyで毎日SELL/HOLD判定
-# 7. SELL条件成立で売却
-# 8. 資金を更新
-# 9. 次のエントリーを待つ
-#
-# 実際の注文は行わない
+# 重要な売買ルール
+# ------------------------------------------------------------
+# 1. 当日の終値が確定した後にシグナル判定
+# 2. BUYシグナル → 翌営業日の始値で購入
+# 3. SELLシグナル → 翌営業日の始値で売却
+# 4. 同じ日の終値を見て、その終値で売買しない
+# 5. 売買手数料・スリッページを考慮
+# 6. EntryStrategy / ExitStrategy / RiskManager を統合
 # ============================================================
 
 
@@ -29,23 +25,10 @@ from strategy.risk import RiskManager
 
 
 # ============================================================
-# 本格売買バックテスト
+# TradingBacktestEngine
 # ============================================================
 
 class TradingBacktestEngine:
-
-    """
-    EntryStrategy
-    ExitStrategy
-    RiskManager
-
-    を統合した売買バックテスト。
-    """
-
-
-    # ========================================================
-    # 初期化
-    # ========================================================
 
     def __init__(
         self,
@@ -70,8 +53,12 @@ class TradingBacktestEngine:
 
         # Cost
         commission_rate=0.001,
-        slippage_rate=0.001
+        slippage_rate=0.001,
     ):
+
+        # ====================================================
+        # 基本設定
+        # ====================================================
 
         self.initial_capital = float(
             initial_capital
@@ -90,19 +77,11 @@ class TradingBacktestEngine:
         )
 
 
-        if self.initial_capital <= 0:
-
-            raise ValueError(
-                "initial_capitalは0より大きくしてください。"
-            )
-
-
         # ====================================================
         # EntryStrategy
         # ====================================================
 
         self.entry_strategy = EntryStrategy(
-
             minimum_score=
                 entry_minimum_score,
 
@@ -111,15 +90,6 @@ class TradingBacktestEngine:
 
             strong_probability=
                 entry_strong_probability,
-
-            rsi_min=
-                40.0,
-
-            rsi_max=
-                70.0,
-
-            volume_ratio_min=
-                1.0
         )
 
 
@@ -128,7 +98,6 @@ class TradingBacktestEngine:
         # ====================================================
 
         self.exit_strategy = ExitStrategy(
-
             stop_loss_rate=
                 stop_loss_rate,
 
@@ -143,9 +112,6 @@ class TradingBacktestEngine:
 
             minimum_exit_score=
                 minimum_exit_score,
-
-            rsi_overbought=
-                75.0
         )
 
 
@@ -154,7 +120,6 @@ class TradingBacktestEngine:
         # ====================================================
 
         self.risk_manager = RiskManager(
-
             lot_size=
                 lot_size,
 
@@ -174,7 +139,7 @@ class TradingBacktestEngine:
                 commission_rate,
 
             slippage_rate=
-                slippage_rate
+                slippage_rate,
         )
 
 
@@ -188,28 +153,48 @@ class TradingBacktestEngine:
 
         self.metrics = {}
 
-        self.skipped_entries = []
+        self.skipped_entries = pd.DataFrame()
+
+        self.order_log = pd.DataFrame()
 
 
     # ========================================================
-    # 日付インデックス整理
+    # インデックス整理
     # ========================================================
 
     @staticmethod
-    def _prepare_index(
-        data
-    ):
+    def _prepare_index(data):
 
-        """
-        DatetimeIndexへ統一する。
-        """
+        if data is None:
+
+            return pd.DataFrame()
+
+
+        if not isinstance(
+            data,
+            pd.DataFrame,
+        ):
+
+            return pd.DataFrame()
+
+
+        if data.empty:
+
+            return pd.DataFrame()
+
 
         df = data.copy()
 
 
-        df.index = pd.to_datetime(
-            df.index
-        )
+        try:
+
+            df.index = pd.to_datetime(
+                df.index
+            )
+
+        except Exception:
+
+            pass
 
 
         # timezone除去
@@ -223,22 +208,83 @@ class TradingBacktestEngine:
                     )
                 )
 
-        except AttributeError:
+        except Exception:
 
             pass
 
 
-        df = (
-            df[
-                ~df.index.duplicated(
-                    keep="last"
-                )
-            ]
-            .sort_index()
-        )
+        df = df[
+            ~df.index.duplicated(
+                keep="last"
+            )
+        ]
+
+
+        df = df.sort_index()
 
 
         return df
+
+
+    # ========================================================
+    # float安全変換
+    # ========================================================
+
+    @staticmethod
+    def _safe_float(
+        value,
+        default=None,
+    ):
+
+        try:
+
+            if value is None:
+
+                return default
+
+
+            if isinstance(
+                value,
+                pd.Series,
+            ):
+
+                values = (
+                    pd.to_numeric(
+                        value,
+                        errors="coerce",
+                    )
+                    .dropna()
+                )
+
+
+                if values.empty:
+
+                    return default
+
+
+                return float(
+                    values.iloc[-1]
+                )
+
+
+            number = float(
+                value
+            )
+
+
+            if not np.isfinite(
+                number
+            ):
+
+                return default
+
+
+            return number
+
+
+        except Exception:
+
+            return default
 
 
     # ========================================================
@@ -249,44 +295,8 @@ class TradingBacktestEngine:
         self,
         stock_data,
         ai_data,
-        walk_results
+        walk_results,
     ):
-
-        """
-        株価・AI特徴量・ウォークフォワード結果を
-        バックテスト用に整理する。
-        """
-
-
-        if (
-            stock_data is None
-            or stock_data.empty
-        ):
-
-            raise ValueError(
-                "stock_dataがありません。"
-            )
-
-
-        if (
-            ai_data is None
-            or ai_data.empty
-        ):
-
-            raise ValueError(
-                "ai_dataがありません。"
-            )
-
-
-        if (
-            walk_results is None
-            or walk_results.empty
-        ):
-
-            raise ValueError(
-                "walk_resultsがありません。"
-            )
-
 
         stock = self._prepare_index(
             stock_data
@@ -301,20 +311,19 @@ class TradingBacktestEngine:
         )
 
 
-        # ----------------------------------------------------
-        # 必須株価列
-        # ----------------------------------------------------
+        # ====================================================
+        # 株価データ確認
+        # ====================================================
 
         required_stock_columns = [
             "Open",
             "High",
             "Low",
-            "Close"
+            "Close",
         ]
 
 
-        missing = [
-
+        missing_stock_columns = [
             column
 
             for column
@@ -325,149 +334,287 @@ class TradingBacktestEngine:
         ]
 
 
-        if missing:
+        if missing_stock_columns:
 
             raise ValueError(
-                "stock_dataに必要な列がありません: "
+                "株価データに必要な列がありません: "
                 + ", ".join(
-                    missing
+                    missing_stock_columns
                 )
             )
 
 
-        # ----------------------------------------------------
-        # AI確率
-        # ----------------------------------------------------
+        # ====================================================
+        # Walk Forward確認
+        # ====================================================
 
-        if (
-            "Probability_Up"
-            not in predictions.columns
-        ):
+        if "Probability_Up" not in predictions.columns:
 
             raise ValueError(
-                "walk_resultsにProbability_Upがありません。"
+                "walk_results に "
+                "Probability_Up 列がありません。"
+            )
+
+
+        # ====================================================
+        # 数値化
+        # ====================================================
+
+        for column in [
+            "Open",
+            "High",
+            "Low",
+            "Close",
+        ]:
+
+            stock[column] = (
+                pd.to_numeric(
+                    stock[column],
+                    errors="coerce",
+                )
+            )
+
+
+        predictions[
+            "Probability_Up"
+        ] = (
+            pd.to_numeric(
+                predictions[
+                    "Probability_Up"
+                ],
+                errors="coerce",
+            )
+        )
+
+
+        stock = stock.dropna(
+            subset=[
+                "Open",
+                "Close",
+            ]
+        )
+
+
+        if stock.empty:
+
+            raise ValueError(
+                "有効な株価データがありません。"
+            )
+
+
+        if predictions.empty:
+
+            raise ValueError(
+                "ウォークフォワード予測結果がありません。"
             )
 
 
         return (
             stock,
             features,
-            predictions
+            predictions,
         )
-
-
-    # ========================================================
-    # 次の営業日
-    # ========================================================
-
-    @staticmethod
-    def get_next_trading_date(
-        stock_data,
-        signal_date
-    ):
-
-        """
-        シグナル日の次の株価データ日を取得する。
-        """
-
-        future_dates = (
-            stock_data.index[
-                stock_data.index
-                > signal_date
-            ]
-        )
-
-
-        if len(
-            future_dates
-        ) == 0:
-
-            return None
-
-
-        return future_dates[0]
 
 
     # ========================================================
     # AI確率取得
     # ========================================================
 
-    @staticmethod
     def get_probability(
+        self,
         predictions,
-        date
+        date,
     ):
 
-        """
-        指定日のウォークフォワードAI確率を取得。
-        """
-
-        if (
-            date
-            not in predictions.index
-        ):
+        if date not in predictions.index:
 
             return None
-
-
-        value = predictions.loc[
-            date,
-            "Probability_Up"
-        ]
-
-
-        if isinstance(
-            value,
-            pd.Series
-        ):
-
-            value = value.iloc[-1]
 
 
         try:
 
-            value = float(
-                value
+            value = predictions.loc[
+                date,
+                "Probability_Up"
+            ]
+
+
+            probability = (
+                self._safe_float(
+                    value
+                )
             )
 
-        except (
-            TypeError,
-            ValueError
-        ):
+
+            if probability is None:
+
+                return None
+
+
+            if (
+                probability < 0
+                or probability > 1
+            ):
+
+                return None
+
+
+            return probability
+
+
+        except Exception:
 
             return None
-
-
-        if not np.isfinite(
-            value
-        ):
-
-            return None
-
-
-        return value
 
 
     # ========================================================
-    # 売却価格
+    # 特徴量行取得
+    # ========================================================
+
+    def get_feature_row(
+        self,
+        features,
+        date,
+    ):
+
+        if date not in features.index:
+
+            return None
+
+
+        try:
+
+            row = features.loc[
+                date
+            ]
+
+
+            # 重複日付等でDataFrameになった場合
+            if isinstance(
+                row,
+                pd.DataFrame,
+            ):
+
+                if row.empty:
+
+                    return None
+
+
+                row = row.iloc[-1]
+
+
+            return row
+
+
+        except Exception:
+
+            return None
+
+
+    # ========================================================
+    # 次営業日取得
+    # ========================================================
+
+    @staticmethod
+    def get_next_trading_date(
+        stock_index,
+        current_date,
+    ):
+
+        try:
+
+            location = (
+                stock_index.get_loc(
+                    current_date
+                )
+            )
+
+
+            # 重複等への保険
+            if isinstance(
+                location,
+                slice,
+            ):
+
+                location = (
+                    location.stop
+                    - 1
+                )
+
+
+            if isinstance(
+                location,
+                np.ndarray,
+            ):
+
+                positions = np.where(
+                    location
+                )[0]
+
+                if len(
+                    positions
+                ) == 0:
+
+                    return None
+
+                location = int(
+                    positions[-1]
+                )
+
+
+            next_location = (
+                int(location)
+                + 1
+            )
+
+
+            if (
+                next_location
+                >= len(stock_index)
+            ):
+
+                return None
+
+
+            return stock_index[
+                next_location
+            ]
+
+
+        except Exception:
+
+            return None
+
+
+    # ========================================================
+    # BUY約定価格
+    # ========================================================
+
+    def calculate_buy_price(
+        self,
+        open_price,
+    ):
+
+        return (
+            float(open_price)
+            * (
+                1.0
+                + self.slippage_rate
+            )
+        )
+
+
+    # ========================================================
+    # SELL約定価格
     # ========================================================
 
     def calculate_sell_price(
         self,
-        market_price
+        open_price,
     ):
 
-        """
-        売却時のスリッページを反映。
-        """
-
-        market_price = float(
-            market_price
-        )
-
-
         return (
-            market_price
+            float(open_price)
             * (
                 1.0
                 - self.slippage_rate
@@ -482,42 +629,170 @@ class TradingBacktestEngine:
     def calculate_sell_commission(
         self,
         sell_price,
-        shares
+        shares,
     ):
 
+        gross_value = (
+            float(sell_price)
+            * int(shares)
+        )
+
+
         return (
-            float(
-                sell_price
-            )
-            * int(
-                shares
-            )
+            gross_value
             * self.commission_rate
         )
 
 
     # ========================================================
-    # バックテスト実行
+    # Exit判定
+    # ========================================================
+
+    def evaluate_exit_safely(
+        self,
+        row,
+        probability_up,
+        entry_price,
+        current_price,
+        holding_days,
+    ):
+        """
+        probability_up が存在しない場合でも
+        バックテストを停止させない。
+
+        AI確率がある日は通常のExitStrategy。
+
+        AI確率がない日は、
+        損切り・利益確定・最大保有期間を
+        優先して確認する。
+        """
+
+        # ----------------------------------------------------
+        # AI確率がある
+        # ----------------------------------------------------
+
+        if probability_up is not None:
+
+            return self.exit_strategy.evaluate(
+                row=row,
+                probability_up=
+                    probability_up,
+
+                entry_price=
+                    entry_price,
+
+                current_price=
+                    current_price,
+
+                holding_days=
+                    holding_days,
+            )
+
+
+        # ----------------------------------------------------
+        # AI確率がない
+        # Hard Exitのみ確認
+        # ----------------------------------------------------
+
+        hard_exit = (
+            self.exit_strategy
+            .evaluate_hard_exit(
+                entry_price=
+                    entry_price,
+
+                current_price=
+                    current_price,
+
+                holding_days=
+                    holding_days,
+            )
+        )
+
+
+        if hard_exit.get(
+            "triggered",
+            False,
+        ):
+
+            return {
+                "action":
+                    "SELL",
+
+                "exit_type":
+                    hard_exit.get(
+                        "exit_type",
+                        "HARD_EXIT",
+                    ),
+
+                "reason_code":
+                    hard_exit.get(
+                        "reason_code",
+                        "HARD_EXIT",
+                    ),
+
+                "summary":
+                    hard_exit.get(
+                        "summary",
+                        "ハードExit条件成立",
+                    ),
+
+                "exit_score":
+                    0,
+
+                "max_score":
+                    7,
+
+                "probability_up":
+                    None,
+
+                "holding_days":
+                    holding_days,
+            }
+
+
+        return {
+            "action":
+                "HOLD",
+
+            "exit_type":
+                "NONE",
+
+            "reason_code":
+                "NO_AI_PROBABILITY",
+
+            "summary":
+                "AI確率なし・ハードExit条件なし",
+
+            "exit_score":
+                0,
+
+            "max_score":
+                7,
+
+            "probability_up":
+                None,
+
+            "holding_days":
+                holding_days,
+        }
+
+
+    # ========================================================
+    # メインバックテスト
     # ========================================================
 
     def run(
         self,
         stock_data,
         ai_data,
-        walk_results
+        walk_results,
     ):
-
-        """
-        本格戦略バックテストを実行する。
-        """
-
 
         (
             stock,
             features,
-            predictions
+            predictions,
         ) = self.prepare_data(
-
             stock_data=
                 stock_data,
 
@@ -525,12 +800,12 @@ class TradingBacktestEngine:
                 ai_data,
 
             walk_results=
-                walk_results
+                walk_results,
         )
 
 
         # ====================================================
-        # 初期状態
+        # 初期化
         # ====================================================
 
         cash = float(
@@ -540,28 +815,36 @@ class TradingBacktestEngine:
 
         position = None
 
-        trade_records = []
+        pending_order = None
+
+
+        trades = []
 
         equity_records = []
 
         skipped_entries = []
 
+        order_log = []
 
-        # ====================================================
-        # バックテスト対象期間
-        # ====================================================
 
-        start_date = (
+        prediction_start = (
             predictions.index.min()
         )
 
 
-        trading_dates = (
-            stock.index[
-                stock.index
-                >= start_date
-            ]
-        )
+        trading_dates = stock.index[
+            stock.index
+            >= prediction_start
+        ]
+
+
+        if len(
+            trading_dates
+        ) == 0:
+
+            raise ValueError(
+                "バックテスト可能な営業日がありません。"
+            )
 
 
         # ====================================================
@@ -570,512 +853,817 @@ class TradingBacktestEngine:
 
         for current_date in trading_dates:
 
-            stock_row = stock.loc[
+            current_row = stock.loc[
                 current_date
             ]
 
 
             if isinstance(
-                stock_row,
-                pd.DataFrame
+                current_row,
+                pd.DataFrame,
             ):
 
-                stock_row = (
-                    stock_row.iloc[-1]
+                current_row = (
+                    current_row.iloc[-1]
                 )
 
 
-            close_price = float(
-                stock_row[
-                    "Close"
-                ]
+            open_price = (
+                self._safe_float(
+                    current_row.get(
+                        "Open"
+                    )
+                )
             )
 
 
+            close_price = (
+                self._safe_float(
+                    current_row.get(
+                        "Close"
+                    )
+                )
+            )
+
+
+            if (
+                open_price is None
+                or close_price is None
+            ):
+
+                continue
+
+
             # =================================================
-            # ① ポジション保有中
+            # A. 始値で予約注文を約定
             # =================================================
 
-            if position is not None:
+            if pending_order is not None:
 
-                position[
-                    "holding_days"
-                ] += 1
+                order_type = (
+                    pending_order.get(
+                        "type"
+                    )
+                )
 
 
-                # ---------------------------------------------
-                # 特徴量がある日のみ
-                # AI・テクニカル売却判定を実施
-                # ---------------------------------------------
+                # =============================================
+                # BUY注文
+                # =============================================
 
                 if (
-                    current_date
-                    in features.index
+                    order_type == "BUY"
+                    and position is None
                 ):
 
-                    feature_row = (
-                        features.loc[
-                            current_date
-                        ]
-                    )
+                    risk_result = (
+                        self.risk_manager
+                        .evaluate_trade(
+                            capital=
+                                cash,
 
-
-                    if isinstance(
-                        feature_row,
-                        pd.DataFrame
-                    ):
-
-                        feature_row = (
-                            feature_row.iloc[-1]
-                        )
-
-
-                    probability_up = (
-                        self.get_probability(
-                            predictions,
-                            current_date
+                            market_price=
+                                open_price,
                         )
                     )
 
 
-                    exit_result = (
-                        self.exit_strategy.evaluate(
-                            row=feature_row,
-                            entry_price=position[
-                                "entry_price"
-                            ],
-                            current_price=close_price,
-                            probability_up=probability_up,
-                            holding_days=position[
-                                "holding_days"
-                            ]
+                    can_trade = bool(
+                        risk_result.get(
+                            "can_trade",
+                            False,
                         )
                     )
 
 
-                    # =========================================
-                    # SELL
-                    # =========================================
+                    shares = int(
+                        risk_result.get(
+                            "shares",
+                            0,
+                        )
+                    )
+
 
                     if (
-                        exit_result[
-                            "action"
-                        ]
-                        == "SELL"
+                        can_trade
+                        and shares
+                        >= self.lot_size
                     ):
 
-                        sell_price = (
-                            self.calculate_sell_price(
-                                close_price
+                        entry_price = (
+                            self._safe_float(
+                                risk_result.get(
+                                    "entry_price"
+                                )
                             )
                         )
 
 
-                        sell_commission = (
-                            self.calculate_sell_commission(
-                                sell_price=
-                                    sell_price,
-
-                                shares=
-                                    position[
-                                        "shares"
-                                    ]
+                        required_cash = (
+                            self._safe_float(
+                                risk_result.get(
+                                    "required_cash"
+                                )
                             )
                         )
 
 
-                        sale_value = (
-                            sell_price
-                            * position[
-                                "shares"
-                            ]
+                        purchase_value = (
+                            self._safe_float(
+                                risk_result.get(
+                                    "purchase_value"
+                                )
+                            )
                         )
 
 
-                        cash += (
-                            sale_value
-                            - sell_commission
+                        buy_commission = (
+                            self._safe_float(
+                                risk_result.get(
+                                    "buy_commission"
+                                ),
+                                0.0,
+                            )
                         )
 
 
-                        # -------------------------------------
-                        # 実現損益
-                        # -------------------------------------
-
-                        total_buy_cost = (
-                            position[
-                                "required_cash"
-                            ]
+                        stop_price = (
+                            self._safe_float(
+                                risk_result.get(
+                                    "stop_price"
+                                )
+                            )
                         )
 
 
-                        net_sale_value = (
-                            sale_value
-                            - sell_commission
-                        )
-
-
-                        profit = (
-                            net_sale_value
-                            - total_buy_cost
+                        take_profit_price = (
+                            self._safe_float(
+                                risk_result.get(
+                                    "take_profit_price"
+                                )
+                            )
                         )
 
 
                         if (
-                            total_buy_cost
-                            > 0
+                            entry_price is not None
+                            and required_cash is not None
+                            and required_cash <= cash
                         ):
 
-                            profit_rate = (
-                                profit
-                                / total_buy_cost
+                            cash -= (
+                                required_cash
                             )
+
+
+                            position = {
+                                "entry_date":
+                                    current_date,
+
+                                "signal_date":
+                                    pending_order.get(
+                                        "signal_date"
+                                    ),
+
+                                "entry_price":
+                                    entry_price,
+
+                                "market_open":
+                                    open_price,
+
+                                "shares":
+                                    shares,
+
+                                "purchase_value":
+                                    purchase_value,
+
+                                "buy_commission":
+                                    buy_commission,
+
+                                "stop_price":
+                                    stop_price,
+
+                                "take_profit_price":
+                                    take_profit_price,
+
+                                "entry_probability":
+                                    pending_order.get(
+                                        "probability_up"
+                                    ),
+
+                                "entry_score":
+                                    pending_order.get(
+                                        "entry_score"
+                                    ),
+
+                                "holding_days":
+                                    0,
+                            }
+
+
+                            order_log.append(
+                                {
+                                    "Date":
+                                        current_date,
+
+                                    "Order":
+                                        "BUY",
+
+                                    "Status":
+                                        "FILLED",
+
+                                    "Signal_Date":
+                                        pending_order.get(
+                                            "signal_date"
+                                        ),
+
+                                    "Market_Open":
+                                        open_price,
+
+                                    "Execution_Price":
+                                        entry_price,
+
+                                    "Shares":
+                                        shares,
+                                }
+                            )
+
 
                         else:
 
-                            profit_rate = 0.0
+                            skipped_entries.append(
+                                {
+                                    "Signal_Date":
+                                        pending_order.get(
+                                            "signal_date"
+                                        ),
+
+                                    "Execution_Date":
+                                        current_date,
+
+                                    "Probability_Up":
+                                        pending_order.get(
+                                            "probability_up"
+                                        ),
+
+                                    "Entry_Score":
+                                        pending_order.get(
+                                            "entry_score"
+                                        ),
+
+                                    "Market_Open":
+                                        open_price,
+
+                                    "Reason":
+                                        "必要資金を確保できません",
+                                }
+                            )
 
 
-                        # -------------------------------------
-                        # 取引保存
-                        # -------------------------------------
+                    else:
 
-                        trade_records.append(
+                        skipped_entries.append(
                             {
-
                                 "Signal_Date":
-                                    position[
+                                    pending_order.get(
                                         "signal_date"
-                                    ],
+                                    ),
 
-                                "Entry_Date":
-                                    position[
-                                        "entry_date"
-                                    ],
-
-                                "Exit_Date":
+                                "Execution_Date":
                                     current_date,
 
-                                "Entry_Probability":
-                                    position[
-                                        "entry_probability"
-                                    ],
+                                "Probability_Up":
+                                    pending_order.get(
+                                        "probability_up"
+                                    ),
 
                                 "Entry_Score":
-                                    position[
+                                    pending_order.get(
                                         "entry_score"
-                                    ],
+                                    ),
 
-                                "Entry_Price":
-                                    position[
-                                        "entry_price"
-                                    ],
+                                "Market_Open":
+                                    open_price,
 
-                                "Exit_Price":
-                                    sell_price,
-
-                                "Shares":
-                                    position[
-                                        "shares"
-                                    ],
-
-                                "Holding_Days":
-                                    position[
-                                        "holding_days"
-                                    ],
-
-                                "Buy_Value":
-                                    position[
-                                        "purchase_value"
-                                    ],
-
-                                "Buy_Commission":
-                                    position[
-                                        "buy_commission"
-                                    ],
-
-                                "Sell_Commission":
-                                    sell_commission,
-
-                                "Profit":
-                                    profit,
-
-                                "Profit_Rate":
-                                    profit_rate,
-
-                                "Exit_Type":
-                                    exit_result[
-                                        "exit_type"
-                                    ],
-
-                                "Exit_Reason":
-                                    exit_result[
-                                        "summary"
-                                    ],
-
-                                "Exit_Score":
-                                    exit_result[
-                                        "exit_score"
-                                    ],
-
-                                "Capital_After":
-                                    cash
+                                "Reason":
+                                    risk_result.get(
+                                        "reason",
+                                        "資金管理条件で見送り",
+                                    ),
                             }
                         )
 
 
-                        position = None
+                        order_log.append(
+                            {
+                                "Date":
+                                    current_date,
+
+                                "Order":
+                                    "BUY",
+
+                                "Status":
+                                    "SKIPPED",
+
+                                "Signal_Date":
+                                    pending_order.get(
+                                        "signal_date"
+                                    ),
+
+                                "Market_Open":
+                                    open_price,
+
+                                "Execution_Price":
+                                    None,
+
+                                "Shares":
+                                    0,
+                            }
+                        )
 
 
-            # =================================================
-            # ② ポジションなし
-            # =================================================
-
-            if position is None:
-
-                # ---------------------------------------------
-                # 当日のAI予測があるか
-                # ---------------------------------------------
-
-                probability_up = (
-                    self.get_probability(
-                        predictions,
-                        current_date
-                    )
-                )
+                    pending_order = None
 
 
-                if (
-                    probability_up
-                    is not None
-                    and current_date
-                    in features.index
+                # =============================================
+                # SELL注文
+                # =============================================
+
+                elif (
+                    order_type == "SELL"
+                    and position is not None
                 ):
 
-                    feature_row = (
-                        features.loc[
-                            current_date
+                    sell_price = (
+                        self.calculate_sell_price(
+                            open_price
+                        )
+                    )
+
+
+                    shares = int(
+                        position[
+                            "shares"
                         ]
                     )
 
 
-                    if isinstance(
-                        feature_row,
-                        pd.DataFrame
-                    ):
-
-                        feature_row = (
-                            feature_row.iloc[-1]
-                        )
+                    gross_sell_value = (
+                        sell_price
+                        * shares
+                    )
 
 
-                    # =========================================
-                    # EntryStrategy
-                    # =========================================
+                    sell_commission = (
+                        self.calculate_sell_commission(
+                            sell_price=
+                                sell_price,
 
-                    entry_result = (
-                        self.entry_strategy.evaluate(
-                            row=feature_row,
-                            probability_up=
-                                probability_up
+                            shares=
+                                shares,
                         )
                     )
 
 
-                    # =========================================
-                    # BUYシグナル
-                    # =========================================
+                    net_sell_value = (
+                        gross_sell_value
+                        - sell_commission
+                    )
+
+
+                    cash += (
+                        net_sell_value
+                    )
+
+
+                    entry_cost = (
+                        position[
+                            "purchase_value"
+                        ]
+                        + position[
+                            "buy_commission"
+                        ]
+                    )
+
+
+                    profit = (
+                        net_sell_value
+                        - entry_cost
+                    )
+
 
                     if (
-                        entry_result[
+                        entry_cost > 0
+                    ):
+
+                        profit_rate = (
+                            profit
+                            / entry_cost
+                        )
+
+                    else:
+
+                        profit_rate = 0.0
+
+
+                    trades.append(
+                        {
+                            "Entry_Signal_Date":
+                                position.get(
+                                    "signal_date"
+                                ),
+
+                            "Entry_Date":
+                                position[
+                                    "entry_date"
+                                ],
+
+                            "Exit_Signal_Date":
+                                pending_order.get(
+                                    "signal_date"
+                                ),
+
+                            "Exit_Date":
+                                current_date,
+
+                            "Entry_Price":
+                                position[
+                                    "entry_price"
+                                ],
+
+                            "Exit_Price":
+                                sell_price,
+
+                            "Shares":
+                                shares,
+
+                            "Entry_Probability":
+                                position.get(
+                                    "entry_probability"
+                                ),
+
+                            "Entry_Score":
+                                position.get(
+                                    "entry_score"
+                                ),
+
+                            "Exit_Probability":
+                                pending_order.get(
+                                    "probability_up"
+                                ),
+
+                            "Exit_Score":
+                                pending_order.get(
+                                    "exit_score"
+                                ),
+
+                            "Exit_Reason":
+                                pending_order.get(
+                                    "reason_code",
+                                    "SELL",
+                                ),
+
+                            "Holding_Days":
+                                position.get(
+                                    "holding_days",
+                                    0,
+                                ),
+
+                            "Purchase_Value":
+                                position[
+                                    "purchase_value"
+                                ],
+
+                            "Gross_Sell_Value":
+                                gross_sell_value,
+
+                            "Buy_Commission":
+                                position[
+                                    "buy_commission"
+                                ],
+
+                            "Sell_Commission":
+                                sell_commission,
+
+                            "Total_Commission":
+                                (
+                                    position[
+                                        "buy_commission"
+                                    ]
+                                    + sell_commission
+                                ),
+
+                            "Profit":
+                                profit,
+
+                            "Profit_Rate":
+                                profit_rate,
+
+                            "Forced_Exit":
+                                False,
+                        }
+                    )
+
+
+                    order_log.append(
+                        {
+                            "Date":
+                                current_date,
+
+                            "Order":
+                                "SELL",
+
+                            "Status":
+                                "FILLED",
+
+                            "Signal_Date":
+                                pending_order.get(
+                                    "signal_date"
+                                ),
+
+                            "Market_Open":
+                                open_price,
+
+                            "Execution_Price":
+                                sell_price,
+
+                            "Shares":
+                                shares,
+                        }
+                    )
+
+
+                    position = None
+
+                    pending_order = None
+
+
+                else:
+
+                    # 状態と注文が一致しない場合は破棄
+                    pending_order = None
+
+
+            # =================================================
+            # B. 当日終値時点のAI確率・特徴量
+            # =================================================
+
+            probability_up = (
+                self.get_probability(
+                    predictions=
+                        predictions,
+
+                    date=
+                        current_date,
+                )
+            )
+
+
+            feature_row = (
+                self.get_feature_row(
+                    features=
+                        features,
+
+                    date=
+                        current_date,
+                )
+            )
+
+
+            # =================================================
+            # C. 終値確定後にSELL判定
+            # =================================================
+
+            if (
+                position is not None
+                and pending_order is None
+            ):
+
+                # エントリー日を0日として、
+                # 翌営業日から保有日数を増やす
+                if (
+                    current_date
+                    > position[
+                        "entry_date"
+                    ]
+                ):
+
+                    position[
+                        "holding_days"
+                    ] += 1
+
+
+                if feature_row is not None:
+
+                    exit_result = (
+                        self.evaluate_exit_safely(
+                            row=
+                                feature_row,
+
+                            probability_up=
+                                probability_up,
+
+                            entry_price=
+                                position[
+                                    "entry_price"
+                                ],
+
+                            current_price=
+                                close_price,
+
+                            holding_days=
+                                position[
+                                    "holding_days"
+                                ],
+                        )
+                    )
+
+
+                    if (
+                        exit_result.get(
                             "action"
-                        ]
-                        == "BUY"
+                        )
+                        == "SELL"
                     ):
 
                         next_date = (
                             self.get_next_trading_date(
-                                stock_data=stock,
-                                signal_date=current_date
+                                stock.index,
+                                current_date,
                             )
                         )
 
 
                         if next_date is not None:
 
-                            next_row = (
-                                stock.loc[
-                                    next_date
-                                ]
+                            pending_order = {
+                                "type":
+                                    "SELL",
+
+                                "signal_date":
+                                    current_date,
+
+                                "execution_date":
+                                    next_date,
+
+                                "probability_up":
+                                    probability_up,
+
+                                "exit_score":
+                                    exit_result.get(
+                                        "exit_score",
+                                        0,
+                                    ),
+
+                                "reason_code":
+                                    exit_result.get(
+                                        "reason_code",
+                                        "SELL",
+                                    ),
+
+                                "summary":
+                                    exit_result.get(
+                                        "summary",
+                                        "",
+                                    ),
+                            }
+
+
+                            order_log.append(
+                                {
+                                    "Date":
+                                        current_date,
+
+                                    "Order":
+                                        "SELL",
+
+                                    "Status":
+                                        "SIGNAL",
+
+                                    "Signal_Date":
+                                        current_date,
+
+                                    "Market_Open":
+                                        None,
+
+                                    "Execution_Price":
+                                        None,
+
+                                    "Shares":
+                                        position[
+                                            "shares"
+                                        ],
+                                }
                             )
-
-
-                            if isinstance(
-                                next_row,
-                                pd.DataFrame
-                            ):
-
-                                next_row = (
-                                    next_row.iloc[-1]
-                                )
-
-
-                            next_open = float(
-                                next_row[
-                                    "Open"
-                                ]
-                            )
-
-
-                            # =================================
-                            # RiskManager
-                            # =================================
-
-                            risk_result = (
-                                self.risk_manager.evaluate_trade(
-                                    capital=cash,
-                                    market_price=next_open
-                                )
-                            )
-
-
-                            if (
-                                risk_result[
-                                    "can_trade"
-                                ]
-                            ):
-
-                                # -----------------------------
-                                # BUY
-                                # -----------------------------
-
-                                required_cash = (
-                                    risk_result[
-                                        "required_cash"
-                                    ]
-                                )
-
-
-                                if (
-                                    required_cash
-                                    <= cash
-                                ):
-
-                                    cash -= (
-                                        required_cash
-                                    )
-
-
-                                    position = {
-
-                                        "signal_date":
-                                            current_date,
-
-                                        "entry_date":
-                                            next_date,
-
-                                        "entry_probability":
-                                            probability_up,
-
-                                        "entry_score":
-                                            entry_result[
-                                                "score"
-                                            ],
-
-                                        "entry_price":
-                                            risk_result[
-                                                "entry_price"
-                                            ],
-
-                                        "stop_price":
-                                            risk_result[
-                                                "stop_price"
-                                            ],
-
-                                        "take_profit_price":
-                                            risk_result[
-                                                "take_profit_price"
-                                            ],
-
-                                        "shares":
-                                            risk_result[
-                                                "shares"
-                                            ],
-
-                                        "purchase_value":
-                                            risk_result[
-                                                "purchase_value"
-                                            ],
-
-                                        "buy_commission":
-                                            risk_result[
-                                                "buy_commission"
-                                            ],
-
-                                        "required_cash":
-                                            required_cash,
-
-                                        "holding_days":
-                                            0
-                                    }
-
-
-                            else:
-
-                                skipped_entries.append(
-                                    {
-
-                                        "Date":
-                                            current_date,
-
-                                        "Probability_Up":
-                                            probability_up,
-
-                                        "Entry_Score":
-                                            entry_result[
-                                                "score"
-                                            ],
-
-                                        "Reason":
-                                            risk_result[
-                                                "reason"
-                                            ]
-                                    }
-                                )
 
 
             # =================================================
-            # ③ 日次資産評価
+            # D. 終値確定後にBUY判定
             # =================================================
 
-            if position is None:
+            elif (
+                position is None
+                and pending_order is None
+                and probability_up is not None
+                and feature_row is not None
+            ):
 
-                market_value = 0.0
+                entry_result = (
+                    self.entry_strategy.evaluate(
+                        row=
+                            feature_row,
 
-            else:
+                        probability_up=
+                            probability_up,
+                    )
+                )
 
-                # ------------------------------------------------
-                # エントリー日は未来日になるため、
-                # シグナル日にはまだ保有していない扱いにする。
-                # ------------------------------------------------
 
                 if (
-                    current_date
-                    < position[
-                        "entry_date"
-                    ]
+                    entry_result.get(
+                        "action"
+                    )
+                    == "BUY"
                 ):
 
-                    market_value = 0.0
-
-                else:
-
-                    market_value = (
-                        close_price
-                        * position[
-                            "shares"
-                        ]
+                    next_date = (
+                        self.get_next_trading_date(
+                            stock.index,
+                            current_date,
+                        )
                     )
+
+
+                    if next_date is not None:
+
+                        pending_order = {
+                            "type":
+                                "BUY",
+
+                            "signal_date":
+                                current_date,
+
+                            "execution_date":
+                                next_date,
+
+                            "probability_up":
+                                probability_up,
+
+                            "entry_score":
+                                entry_result.get(
+                                    "score",
+                                    0,
+                                ),
+
+                            "summary":
+                                entry_result.get(
+                                    "summary",
+                                    "",
+                                ),
+                        }
+
+
+                        order_log.append(
+                            {
+                                "Date":
+                                    current_date,
+
+                                "Order":
+                                    "BUY",
+
+                                "Status":
+                                    "SIGNAL",
+
+                                "Signal_Date":
+                                    current_date,
+
+                                "Market_Open":
+                                    None,
+
+                                "Execution_Price":
+                                    None,
+
+                                "Shares":
+                                    0,
+                            }
+                        )
+
+
+            # =================================================
+            # E. 当日資産評価
+            # =================================================
+
+            market_value = 0.0
+
+
+            if position is not None:
+
+                market_value = (
+                    close_price
+                    * position[
+                        "shares"
+                    ]
+                )
 
 
             total_equity = (
@@ -1086,24 +1674,53 @@ class TradingBacktestEngine:
 
             equity_records.append(
                 {
-
                     "Date":
                         current_date,
 
                     "Cash":
                         cash,
 
-                    "Position_Value":
+                    "Market_Value":
                         market_value,
 
                     "Total_Equity":
-                        total_equity
+                        total_equity,
+
+                    "Position":
+                        (
+                            position[
+                                "shares"
+                            ]
+
+                            if position
+                            is not None
+
+                            else 0
+                        ),
+
+                    "Pending_Order":
+                        (
+                            pending_order.get(
+                                "type"
+                            )
+
+                            if pending_order
+                            is not None
+
+                            else None
+                        ),
                 }
             )
 
 
         # ====================================================
-        # 最終日にポジションが残っている場合
+        # 最終日処理
+        #
+        # 最終日にまだポジションが残っている場合は
+        # 最終終値で強制決済する。
+        #
+        # これは翌営業日の始値がデータ内に存在しないため。
+        # Forced_Exit=Trueとして通常売却と区別する。
         # ====================================================
 
         if position is not None:
@@ -1113,16 +1730,14 @@ class TradingBacktestEngine:
             )
 
 
-            final_row = (
-                stock.loc[
-                    final_date
-                ]
-            )
+            final_row = stock.loc[
+                final_date
+            ]
 
 
             if isinstance(
                 final_row,
-                pd.DataFrame
+                pd.DataFrame,
             ):
 
                 final_row = (
@@ -1130,174 +1745,233 @@ class TradingBacktestEngine:
                 )
 
 
-            final_close = float(
-                final_row[
-                    "Close"
-                ]
+            final_close = (
+                self._safe_float(
+                    final_row.get(
+                        "Close"
+                    )
+                )
             )
 
 
-            sell_price = (
-                self.calculate_sell_price(
+            if final_close is not None:
+
+                sell_price = (
                     final_close
+                    * (
+                        1.0
+                        - self.slippage_rate
+                    )
                 )
-            )
 
 
-            sell_commission = (
-                self.calculate_sell_commission(
-                    sell_price=
-                        sell_price,
-
-                    shares=
-                        position[
-                            "shares"
-                        ]
+                shares = int(
+                    position[
+                        "shares"
+                    ]
                 )
-            )
 
 
-            sale_value = (
-                sell_price
-                * position[
-                    "shares"
-                ]
-            )
+                gross_sell_value = (
+                    sell_price
+                    * shares
+                )
 
 
-            cash += (
-                sale_value
-                - sell_commission
-            )
+                sell_commission = (
+                    self.calculate_sell_commission(
+                        sell_price=
+                            sell_price,
+
+                        shares=
+                            shares,
+                    )
+                )
 
 
-            total_buy_cost = (
-                position[
-                    "required_cash"
-                ]
-            )
+                net_sell_value = (
+                    gross_sell_value
+                    - sell_commission
+                )
 
 
-            net_sale_value = (
-                sale_value
-                - sell_commission
-            )
+                cash += (
+                    net_sell_value
+                )
 
 
-            profit = (
-                net_sale_value
-                - total_buy_cost
-            )
+                entry_cost = (
+                    position[
+                        "purchase_value"
+                    ]
+                    + position[
+                        "buy_commission"
+                    ]
+                )
 
 
-            profit_rate = (
-                profit
-                / total_buy_cost
-                if total_buy_cost > 0
-                else 0.0
-            )
+                profit = (
+                    net_sell_value
+                    - entry_cost
+                )
 
 
-            trade_records.append(
-                {
+                if entry_cost > 0:
 
-                    "Signal_Date":
-                        position[
-                            "signal_date"
-                        ],
+                    profit_rate = (
+                        profit
+                        / entry_cost
+                    )
 
-                    "Entry_Date":
-                        position[
-                            "entry_date"
-                        ],
+                else:
 
-                    "Exit_Date":
-                        final_date,
-
-                    "Entry_Probability":
-                        position[
-                            "entry_probability"
-                        ],
-
-                    "Entry_Score":
-                        position[
-                            "entry_score"
-                        ],
-
-                    "Entry_Price":
-                        position[
-                            "entry_price"
-                        ],
-
-                    "Exit_Price":
-                        sell_price,
-
-                    "Shares":
-                        position[
-                            "shares"
-                        ],
-
-                    "Holding_Days":
-                        position[
-                            "holding_days"
-                        ],
-
-                    "Buy_Value":
-                        position[
-                            "purchase_value"
-                        ],
-
-                    "Buy_Commission":
-                        position[
-                            "buy_commission"
-                        ],
-
-                    "Sell_Commission":
-                        sell_commission,
-
-                    "Profit":
-                        profit,
-
-                    "Profit_Rate":
-                        profit_rate,
-
-                    "Exit_Type":
-                        "END_OF_TEST",
-
-                    "Exit_Reason":
-                        "バックテスト最終日のため決済",
-
-                    "Exit_Score":
-                        0,
-
-                    "Capital_After":
-                        cash
-                }
-            )
+                    profit_rate = 0.0
 
 
-            position = None
+                trades.append(
+                    {
+                        "Entry_Signal_Date":
+                            position.get(
+                                "signal_date"
+                            ),
+
+                        "Entry_Date":
+                            position[
+                                "entry_date"
+                            ],
+
+                        "Exit_Signal_Date":
+                            final_date,
+
+                        "Exit_Date":
+                            final_date,
+
+                        "Entry_Price":
+                            position[
+                                "entry_price"
+                            ],
+
+                        "Exit_Price":
+                            sell_price,
+
+                        "Shares":
+                            shares,
+
+                        "Entry_Probability":
+                            position.get(
+                                "entry_probability"
+                            ),
+
+                        "Entry_Score":
+                            position.get(
+                                "entry_score"
+                            ),
+
+                        "Exit_Probability":
+                            None,
+
+                        "Exit_Score":
+                            None,
+
+                        "Exit_Reason":
+                            "FINAL_DATA_EXIT",
+
+                        "Holding_Days":
+                            position.get(
+                                "holding_days",
+                                0,
+                            ),
+
+                        "Purchase_Value":
+                            position[
+                                "purchase_value"
+                            ],
+
+                        "Gross_Sell_Value":
+                            gross_sell_value,
+
+                        "Buy_Commission":
+                            position[
+                                "buy_commission"
+                            ],
+
+                        "Sell_Commission":
+                            sell_commission,
+
+                        "Total_Commission":
+                            (
+                                position[
+                                    "buy_commission"
+                                ]
+                                + sell_commission
+                            ),
+
+                        "Profit":
+                            profit,
+
+                        "Profit_Rate":
+                            profit_rate,
+
+                        "Forced_Exit":
+                            True,
+                    }
+                )
 
 
-            # ------------------------------------------------
-            # 最終資産を更新
-            # ------------------------------------------------
+                order_log.append(
+                    {
+                        "Date":
+                            final_date,
 
-            if len(
-                equity_records
-            ) > 0:
+                        "Order":
+                            "SELL",
 
-                equity_records[-1][
-                    "Cash"
-                ] = cash
+                        "Status":
+                            "FORCED_FINAL_CLOSE",
 
-                equity_records[-1][
-                    "Position_Value"
-                ] = 0.0
+                        "Signal_Date":
+                            final_date,
 
-                equity_records[-1][
-                    "Total_Equity"
-                ] = cash
+                        "Market_Open":
+                            None,
+
+                        "Execution_Price":
+                            sell_price,
+
+                        "Shares":
+                            shares,
+                    }
+                )
+
+
+                position = None
+
+
+                # --------------------------------------------
+                # 最終日の資産記録を更新
+                # --------------------------------------------
+
+                if equity_records:
+
+                    equity_records[-1][
+                        "Cash"
+                    ] = cash
+
+                    equity_records[-1][
+                        "Market_Value"
+                    ] = 0.0
+
+                    equity_records[-1][
+                        "Total_Equity"
+                    ] = cash
+
+                    equity_records[-1][
+                        "Position"
+                    ] = 0
+
+                    equity_records[-1][
+                        "Pending_Order"
+                    ] = None
 
 
         # ====================================================
@@ -1305,112 +1979,111 @@ class TradingBacktestEngine:
         # ====================================================
 
         self.trades = pd.DataFrame(
-            trade_records
+            trades
         )
 
 
-        self.equity_curve = pd.DataFrame(
-            equity_records
+        self.skipped_entries = (
+            pd.DataFrame(
+                skipped_entries
+            )
+        )
+
+
+        self.order_log = (
+            pd.DataFrame(
+                order_log
+            )
+        )
+
+
+        self.equity_curve = (
+            pd.DataFrame(
+                equity_records
+            )
         )
 
 
         if not self.equity_curve.empty:
 
-            self.equity_curve.set_index(
-                "Date",
-                inplace=True
+            self.equity_curve[
+                "Date"
+            ] = pd.to_datetime(
+                self.equity_curve[
+                    "Date"
+                ]
             )
 
 
-        self.skipped_entries = (
-            skipped_entries
-        )
+            self.equity_curve = (
+                self.equity_curve
+                .set_index(
+                    "Date"
+                )
+                .sort_index()
+            )
 
 
         # ====================================================
-        # 成績計算
+        # 指標計算
         # ====================================================
 
         self.metrics = (
-            self.calculate_metrics()
+            self.calculate_metrics(
+                final_cash=
+                    cash
+            )
         )
 
 
         return (
             self.trades,
             self.equity_curve,
-            self.metrics
+            self.metrics,
         )
 
 
     # ========================================================
-    # 最大ドローダウン
-    # ========================================================
-
-    def calculate_max_drawdown(
-        self
-    ):
-
-        if (
-            self.equity_curve is None
-            or self.equity_curve.empty
-        ):
-
-            return 0.0
-
-
-        equity = (
-            self.equity_curve[
-                "Total_Equity"
-            ]
-        )
-
-
-        running_max = (
-            equity.cummax()
-        )
-
-
-        drawdown = (
-            equity
-            / running_max
-            - 1.0
-        )
-
-
-        return float(
-            drawdown.min()
-        )
-
-
-    # ========================================================
-    # 成績
+    # 成績計算
     # ========================================================
 
     def calculate_metrics(
-        self
+        self,
+        final_cash=None,
     ):
 
-        """
-        バックテスト結果を集計する。
-        """
+        # ====================================================
+        # 最終資産
+        # ====================================================
 
+        if final_cash is None:
 
-        if (
-            self.equity_curve is None
-            or self.equity_curve.empty
-        ):
+            if (
+                self.equity_curve is not None
+                and not self.equity_curve.empty
+                and "Total_Equity"
+                in self.equity_curve.columns
+            ):
 
-            final_capital = (
-                self.initial_capital
-            )
+                final_capital = (
+                    self._safe_float(
+                        self.equity_curve[
+                            "Total_Equity"
+                        ].iloc[-1],
+                        self.initial_capital,
+                    )
+                )
+
+            else:
+
+                final_capital = (
+                    self.initial_capital
+                )
 
         else:
 
             final_capital = float(
-                self.equity_curve[
-                    "Total_Equity"
-                ].iloc[-1]
+                final_cash
             )
 
 
@@ -1427,7 +2100,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 取引なし
+        # 取引0回
         # ====================================================
 
         if (
@@ -1435,8 +2108,12 @@ class TradingBacktestEngine:
             or self.trades.empty
         ):
 
-            return {
+            max_drawdown = (
+                self._calculate_max_drawdown()
+            )
 
+
+            return {
                 "initial_capital":
                     self.initial_capital,
 
@@ -1452,10 +2129,16 @@ class TradingBacktestEngine:
                 "trades":
                     0,
 
+                "trade_count":
+                    0,
+
                 "wins":
                     0,
 
                 "losses":
+                    0,
+
+                "flat":
                     0,
 
                 "win_rate":
@@ -1467,11 +2150,17 @@ class TradingBacktestEngine:
                 "average_profit_rate":
                     None,
 
+                "gross_profit":
+                    0.0,
+
+                "gross_loss":
+                    0.0,
+
                 "profit_factor":
                     None,
 
                 "max_drawdown":
-                    self.calculate_max_drawdown(),
+                    max_drawdown,
 
                 "average_holding_days":
                     None,
@@ -1488,63 +2177,79 @@ class TradingBacktestEngine:
                 "skipped_entries":
                     len(
                         self.skipped_entries
-                    )
+                    ),
+
+                "order_signals":
+                    len(
+                        self.order_log
+                    ),
             }
 
 
         # ====================================================
-        # 通常集計
+        # 損益
         # ====================================================
 
-        profits = (
+        profits = pd.to_numeric(
             self.trades[
                 "Profit"
-            ]
-        )
+            ],
+            errors="coerce",
+        ).fillna(0.0)
 
 
-        profit_rates = (
+        profit_rates = pd.to_numeric(
             self.trades[
                 "Profit_Rate"
-            ]
+            ],
+            errors="coerce",
+        ).fillna(0.0)
+
+
+        holding_days = pd.to_numeric(
+            self.trades[
+                "Holding_Days"
+            ],
+            errors="coerce",
+        ).fillna(0.0)
+
+
+        wins = int(
+            (
+                profits > 0
+            ).sum()
         )
 
 
-        wins = (
-            profits
-            > 0
+        losses = int(
+            (
+                profits < 0
+            ).sum()
         )
 
 
-        losses = (
-            profits
-            < 0
+        flat = int(
+            (
+                profits == 0
+            ).sum()
         )
 
 
-        win_count = int(
-            wins.sum()
+        trade_count = len(
+            self.trades
         )
 
 
-        loss_count = int(
-            losses.sum()
-        )
+        if trade_count > 0:
 
-
-        trade_count = int(
-            len(
-                self.trades
+            win_rate = (
+                wins
+                / trade_count
             )
-        )
 
+        else:
 
-        win_rate = (
-            win_count
-            / trade_count
-            if trade_count > 0
-            else None
-        )
+            win_rate = None
 
 
         gross_profit = float(
@@ -1581,55 +2286,74 @@ class TradingBacktestEngine:
             profit_factor = None
 
 
-        total_commission = float(
+        # ====================================================
+        # 手数料
+        # ====================================================
 
-            self.trades[
-                "Buy_Commission"
-            ].sum()
+        if (
+            "Total_Commission"
+            in self.trades.columns
+        ):
 
-            +
+            total_commission = float(
+                pd.to_numeric(
+                    self.trades[
+                        "Total_Commission"
+                    ],
+                    errors="coerce",
+                )
+                .fillna(0.0)
+                .sum()
+            )
 
-            self.trades[
-                "Sell_Commission"
-            ].sum()
+        else:
+
+            total_commission = 0.0
+
+
+        # ====================================================
+        # 最大ドローダウン
+        # ====================================================
+
+        max_drawdown = (
+            self._calculate_max_drawdown()
         )
 
 
-        return {
+        # ====================================================
+        # 結果
+        # ====================================================
 
+        return {
             "initial_capital":
-                float(
-                    self.initial_capital
-                ),
+                self.initial_capital,
 
             "final_capital":
-                float(
-                    final_capital
-                ),
+                final_capital,
 
             "total_profit":
-                float(
-                    total_profit
-                ),
+                total_profit,
 
             "total_return":
-                float(
-                    total_return
-                ),
+                total_return,
 
             "trades":
                 trade_count,
 
+            "trade_count":
+                trade_count,
+
             "wins":
-                win_count,
+                wins,
 
             "losses":
-                loss_count,
+                losses,
+
+            "flat":
+                flat,
 
             "win_rate":
-                float(
-                    win_rate
-                ),
+                win_rate,
 
             "average_profit":
                 float(
@@ -1641,19 +2365,21 @@ class TradingBacktestEngine:
                     profit_rates.mean()
                 ),
 
+            "gross_profit":
+                gross_profit,
+
+            "gross_loss":
+                gross_loss,
+
             "profit_factor":
                 profit_factor,
 
             "max_drawdown":
-                float(
-                    self.calculate_max_drawdown()
-                ),
+                max_drawdown,
 
             "average_holding_days":
                 float(
-                    self.trades[
-                        "Holding_Days"
-                    ].mean()
+                    holding_days.mean()
                 ),
 
             "best_trade":
@@ -1672,38 +2398,88 @@ class TradingBacktestEngine:
             "skipped_entries":
                 len(
                     self.skipped_entries
-                )
+                ),
+
+            "order_signals":
+                len(
+                    self.order_log
+                ),
         }
 
 
     # ========================================================
-    # 取引履歴取得
+    # 最大ドローダウン
+    # ========================================================
+
+    def _calculate_max_drawdown(
+        self,
+    ):
+
+        if (
+            self.equity_curve is None
+            or self.equity_curve.empty
+            or "Total_Equity"
+            not in self.equity_curve.columns
+        ):
+
+            return 0.0
+
+
+        equity = (
+            pd.to_numeric(
+                self.equity_curve[
+                    "Total_Equity"
+                ],
+                errors="coerce",
+            )
+            .dropna()
+        )
+
+
+        if equity.empty:
+
+            return 0.0
+
+
+        running_max = (
+            equity.cummax()
+        )
+
+
+        drawdown = (
+            equity
+            / running_max
+            - 1.0
+        )
+
+
+        return abs(
+            float(
+                drawdown.min()
+            )
+        )
+
+
+    # ========================================================
+    # 結果取得
     # ========================================================
 
     def get_trades(
-        self
+        self,
     ):
 
         return self.trades.copy()
 
 
-    # ========================================================
-    # 資産曲線取得
-    # ========================================================
-
     def get_equity_curve(
-        self
+        self,
     ):
 
         return self.equity_curve.copy()
 
 
-    # ========================================================
-    # 成績取得
-    # ========================================================
-
     def get_metrics(
-        self
+        self,
     ):
 
         return dict(
@@ -1711,49 +2487,57 @@ class TradingBacktestEngine:
         )
 
 
-    # ========================================================
-    # 資金不足などで見送ったシグナル
-    # ========================================================
-
     def get_skipped_entries(
-        self
+        self,
     ):
 
-        return pd.DataFrame(
-            self.skipped_entries
-        )
+        return self.skipped_entries.copy()
+
+
+    def get_order_log(
+        self,
+    ):
+
+        return self.order_log.copy()
 
 
 # ============================================================
-# 簡単実行関数
+# 簡易実行関数
 # ============================================================
 
 def run_trading_backtest(
     stock_data,
     ai_data,
     walk_results,
-    initial_capital=1_000_000
+    initial_capital=1_000_000,
+    lot_size=100,
 ):
-
-    """
-    本格戦略バックテストを
-    一度に実行する便利関数。
-    """
 
     engine = TradingBacktestEngine(
         initial_capital=
-            initial_capital
+            initial_capital,
+
+        lot_size=
+            lot_size,
     )
 
 
-    return engine.run(
+    trades, equity_curve, metrics = (
+        engine.run(
+            stock_data=
+                stock_data,
 
-        stock_data=
-            stock_data,
+            ai_data=
+                ai_data,
 
-        ai_data=
-            ai_data,
+            walk_results=
+                walk_results,
+        )
+    )
 
-        walk_results=
-            walk_results
+
+    return (
+        trades,
+        equity_curve,
+        metrics,
     )
