@@ -2,18 +2,33 @@
 # アドバンテスト AI売買システム
 # main.py
 #
-# 今回の目的：
-# アドバンテスト（6857.T）の株価データを取得できるか確認する
+# 現在の機能
+# 1. アドバンテスト株価取得
+# 2. 日経平均取得
+# 3. NASDAQ取得
+# 4. SOXX取得
+# 5. ドル円取得
+# 6. 株価チャート表示
+# 7. 市場データ表示
+#
+# ※現在は分析のみ
+# ※実際の売買注文は行いません
 # ============================================================
+
 
 import streamlit as st
 import pandas as pd
 
 from data.stock_data import get_stock_data
 
+from data.market_data import (
+    get_all_market_data,
+    get_latest_market_values
+)
+
 
 # ============================================================
-# Streamlit設定
+# Streamlitページ設定
 # ============================================================
 
 st.set_page_config(
@@ -27,128 +42,138 @@ st.set_page_config(
 # タイトル
 # ============================================================
 
-st.title("📈 アドバンテスト AI売買システム")
+st.title(
+    "📈 アドバンテスト AI売買システム"
+)
 
 st.write(
-    "株価データ取得テスト"
+    "株価・市場環境データ取得システム"
 )
 
 st.divider()
 
 
 # ============================================================
-# 設定
+# システム状態
 # ============================================================
 
-STOCK_CODE = "6857.T"
+st.subheader("システム状態")
 
-STOCK_NAME = "アドバンテスト"
+
+col1, col2, col3, col4 = st.columns(4)
+
+
+with col1:
+
+    st.success(
+        "✅ 株価データ"
+    )
+
+
+with col2:
+
+    st.success(
+        "✅ 市場データ"
+    )
+
+
+with col3:
+
+    st.info(
+        "🔵 AI分析：準備中"
+    )
+
+
+with col4:
+
+    st.warning(
+        "⚠️ 自動売買：OFF"
+    )
+
+
+st.divider()
 
 
 # ============================================================
-# 株価取得ボタン
+# データ取得ボタン
 # ============================================================
 
-st.subheader("① 株価データ取得")
+st.subheader(
+    "📥 データ取得"
+)
+
 
 if st.button(
-    "📥 アドバンテストの株価を取得",
+    "株価・市場データを取得",
     type="primary"
 ):
 
+    # ========================================================
+    # アドバンテスト株価取得
+    # ========================================================
+
+    st.write(
+        "### ① アドバンテスト株価"
+    )
+
     try:
 
-        # ----------------------------------------------------
-        # 株価データ取得
-        # ----------------------------------------------------
-
         with st.spinner(
-            "株価データを取得しています..."
+            "アドバンテストの株価を取得しています..."
         ):
 
-            data = get_stock_data(
-                stock_code=STOCK_CODE,
+            stock_data = get_stock_data(
+                stock_code="6857.T",
                 period="5y",
                 interval="1d"
             )
 
 
-        # ----------------------------------------------------
-        # データ取得成功
-        # ----------------------------------------------------
-
-        if data is not None and not data.empty:
+        if (
+            stock_data is not None
+            and not stock_data.empty
+        ):
 
             st.success(
-                "✅ アドバンテストの株価データを取得できました！"
+                "✅ アドバンテスト株価取得成功"
             )
-
-
-            # ------------------------------------------------
-            # データ件数
-            # ------------------------------------------------
-
-            st.subheader("② データ情報")
-
-            col1, col2, col3 = st.columns(3)
-
-
-            with col1:
-
-                st.metric(
-                    "データ件数",
-                    f"{len(data):,} 件"
-                )
-
-
-            with col2:
-
-                start_date = data.index[0]
-
-                st.metric(
-                    "開始日",
-                    start_date.strftime("%Y-%m-%d")
-                )
-
-
-            with col3:
-
-                end_date = data.index[-1]
-
-                st.metric(
-                    "終了日",
-                    end_date.strftime("%Y-%m-%d")
-                )
 
 
             # ------------------------------------------------
             # 最新株価
             # ------------------------------------------------
 
-            st.subheader("③ 最新株価")
+            latest = stock_data.iloc[-1]
 
-            latest = data.iloc[-1]
 
-            latest_close = float(
+            close_price = float(
                 latest["Close"]
             )
 
-            latest_open = float(
+
+            open_price = float(
                 latest["Open"]
             )
 
-            latest_high = float(
+
+            high_price = float(
                 latest["High"]
             )
 
-            latest_low = float(
+
+            low_price = float(
                 latest["Low"]
             )
 
-            latest_volume = int(
+
+            volume = int(
                 latest["Volume"]
             )
 
+
+            # ------------------------------------------------
+            # 株価表示
+            # ------------------------------------------------
 
             col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -157,7 +182,7 @@ if st.button(
 
                 st.metric(
                     "終値",
-                    f"{latest_close:,.0f} 円"
+                    f"{close_price:,.0f} 円"
                 )
 
 
@@ -165,7 +190,7 @@ if st.button(
 
                 st.metric(
                     "始値",
-                    f"{latest_open:,.0f} 円"
+                    f"{open_price:,.0f} 円"
                 )
 
 
@@ -173,7 +198,7 @@ if st.button(
 
                 st.metric(
                     "高値",
-                    f"{latest_high:,.0f} 円"
+                    f"{high_price:,.0f} 円"
                 )
 
 
@@ -181,7 +206,7 @@ if st.button(
 
                 st.metric(
                     "安値",
-                    f"{latest_low:,.0f} 円"
+                    f"{low_price:,.0f} 円"
                 )
 
 
@@ -189,7 +214,7 @@ if st.button(
 
                 st.metric(
                     "出来高",
-                    f"{latest_volume:,}"
+                    f"{volume:,}"
                 )
 
 
@@ -197,11 +222,15 @@ if st.button(
             # 株価チャート
             # ------------------------------------------------
 
-            st.subheader("④ 株価チャート")
+            st.write(
+                "#### アドバンテスト株価"
+            )
 
-            chart_data = data[
+
+            chart_data = stock_data[
                 ["Close"]
             ].copy()
+
 
             st.line_chart(
                 chart_data
@@ -212,52 +241,388 @@ if st.button(
             # 最新データ
             # ------------------------------------------------
 
-            st.subheader("⑤ 最新の株価データ")
+            with st.expander(
+                "アドバンテスト最新20日分"
+            ):
 
-            display_data = data.tail(20).copy()
-
-            st.dataframe(
-                display_data,
-                use_container_width=True
-            )
-
-
-            # ------------------------------------------------
-            # 完了
-            # ------------------------------------------------
-
-            st.success(
-                "🎉 株価データ取得テストは成功です。"
-            )
+                st.dataframe(
+                    stock_data.tail(20),
+                    use_container_width=True
+                )
 
 
         else:
 
             st.error(
-                "❌ 株価データを取得できませんでした。"
+                "❌ アドバンテスト株価を取得できませんでした。"
             )
 
-
-    # ========================================================
-    # エラー処理
-    # ========================================================
 
     except Exception as e:
 
         st.error(
-            "❌ 株価データ取得中にエラーが発生しました。"
+            "❌ アドバンテスト株価取得エラー"
+        )
+
+        st.exception(e)
+
+
+    # ========================================================
+    # 市場データ取得
+    # ========================================================
+
+    st.divider()
+
+    st.write(
+        "### ② 市場環境"
+    )
+
+
+    try:
+
+        with st.spinner(
+            "市場データを取得しています..."
+        ):
+
+            market_data = get_all_market_data(
+                period="5y",
+                interval="1d"
+            )
+
+
+        # ----------------------------------------------------
+        # エラー確認
+        # ----------------------------------------------------
+
+        market_errors = market_data.get(
+            "_errors",
+            {}
+        )
+
+
+        if market_errors:
+
+            st.warning(
+                "一部の市場データを取得できませんでした。"
+            )
+
+
+        # ----------------------------------------------------
+        # 最新値取得
+        # ----------------------------------------------------
+
+        latest_values = get_latest_market_values(
+            period="5d"
+        )
+
+
+        # ----------------------------------------------------
+        # 市場データ表示
+        # ----------------------------------------------------
+
+        col1, col2 = st.columns(2)
+
+
+        # ----------------------------------------------------
+        # 日経平均
+        # ----------------------------------------------------
+
+        with col1:
+
+            nikkei = latest_values.get(
+                "日経平均"
+            )
+
+
+            if (
+                nikkei
+                and nikkei.get("close") is not None
+            ):
+
+                st.metric(
+                    "🇯🇵 日経平均",
+                    f"{nikkei['close']:,.2f}"
+                )
+
+            else:
+
+                st.error(
+                    "日経平均を取得できませんでした"
+                )
+
+
+        # ----------------------------------------------------
+        # NASDAQ
+        # ----------------------------------------------------
+
+        with col2:
+
+            nasdaq = latest_values.get(
+                "NASDAQ"
+            )
+
+
+            if (
+                nasdaq
+                and nasdaq.get("close") is not None
+            ):
+
+                st.metric(
+                    "🇺🇸 NASDAQ",
+                    f"{nasdaq['close']:,.2f}"
+                )
+
+            else:
+
+                st.error(
+                    "NASDAQを取得できませんでした"
+                )
+
+
+        # ----------------------------------------------------
+        # SOXX
+        # ----------------------------------------------------
+
+        col1, col2 = st.columns(2)
+
+
+        with col1:
+
+            soxx = latest_values.get(
+                "SOXX"
+            )
+
+
+            if (
+                soxx
+                and soxx.get("close") is not None
+            ):
+
+                st.metric(
+                    "💻 SOXX",
+                    f"{soxx['close']:,.2f}"
+                )
+
+            else:
+
+                st.error(
+                    "SOXXを取得できませんでした"
+                )
+
+
+        # ----------------------------------------------------
+        # ドル円
+        # ----------------------------------------------------
+
+        with col2:
+
+            usd_jpy = latest_values.get(
+                "ドル円"
+            )
+
+
+            if (
+                usd_jpy
+                and usd_jpy.get("close") is not None
+            ):
+
+                st.metric(
+                    "💴 ドル円",
+                    f"{usd_jpy['close']:,.2f} 円"
+                )
+
+            else:
+
+                st.error(
+                    "ドル円を取得できませんでした"
+                )
+
+
+        # ====================================================
+        # 市場データ一覧
+        # ====================================================
+
+        st.write(
+            "#### 市場データ一覧"
+        )
+
+
+        market_rows = []
+
+
+        for market_name, info in latest_values.items():
+
+            if info is None:
+
+                continue
+
+
+            if info.get("close") is None:
+
+                continue
+
+
+            market_rows.append(
+                {
+                    "市場": market_name,
+                    "ティッカー": info["ticker"],
+                    "最新値": info["close"],
+                    "データ日": info["date"]
+                }
+            )
+
+
+        if market_rows:
+
+            market_table = pd.DataFrame(
+                market_rows
+            )
+
+
+            st.dataframe(
+                market_table,
+                use_container_width=True
+            )
+
+
+        # ====================================================
+        # 市場チャート
+        # ====================================================
+
+        st.write(
+            "#### 市場データチャート"
+        )
+
+
+        chart_market = pd.DataFrame()
+
+
+        for market_name in [
+            "日経平均",
+            "NASDAQ",
+            "SOXX",
+            "ドル円"
+        ]:
+
+            if market_name not in market_data:
+
+                continue
+
+
+            data = market_data[
+                market_name
+            ]
+
+
+            if data is None or data.empty:
+
+                continue
+
+
+            close_data = data[
+                ["Close"]
+            ].copy()
+
+
+            close_data.rename(
+                columns={
+                    "Close": market_name
+                },
+                inplace=True
+            )
+
+
+            if chart_market.empty:
+
+                chart_market = close_data
+
+            else:
+
+                chart_market = chart_market.join(
+                    close_data,
+                    how="outer"
+                )
+
+
+        if not chart_market.empty:
+
+            chart_market = chart_market.ffill()
+
+
+            st.line_chart(
+                chart_market
+            )
+
+
+        # ====================================================
+        # 成功表示
+        # ====================================================
+
+        st.success(
+            "🎉 市場データの取得が完了しました。"
+        )
+
+
+    except Exception as e:
+
+        st.error(
+            "❌ 市場データ取得エラー"
         )
 
         st.exception(e)
 
 
 # ============================================================
-# 画面下部
+# 現在の開発状況
+# ============================================================
+
+st.divider()
+
+st.subheader(
+    "🚧 開発状況"
+)
+
+
+development_status = {
+    "Streamlit画面": "完了",
+    "アドバンテスト株価取得": "完了",
+    "市場データ取得": "今回追加",
+    "テクニカル分析": "次の段階",
+    "AI予測": "未実装",
+    "エントリー判断": "未実装",
+    "売却判断": "未実装",
+    "リスク管理": "未実装",
+    "バックテスト": "未実装",
+    "仮想売買": "未実装",
+    "自動売買": "OFF"
+}
+
+
+status_df = pd.DataFrame(
+    list(
+        development_status.items()
+    ),
+    columns=[
+        "機能",
+        "状態"
+    ]
+)
+
+
+st.dataframe(
+    status_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# 注意事項
 # ============================================================
 
 st.divider()
 
 st.caption(
-    "現在は株価データ取得のテスト段階です。"
+    "現在はデータ取得・分析システムの開発段階です。"
     "実際の売買注文は行いません。"
 )
