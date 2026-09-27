@@ -12,6 +12,7 @@
 # 8. 固定80/20検証
 # 9. ウォークフォワード検証
 # 10. 正式な売買バックテスト
+# 11. AIエントリー判断
 #
 # ※実際の売買注文は行いません
 # ============================================================
@@ -56,24 +57,25 @@ from ai.features import (
 
 
 # ============================================================
-# AI
+# AIモデル
 # ============================================================
 
 from ai.model import StockPredictionModel
 
 
 # ============================================================
-# ウォークフォワード
+# バックテスト
 # ============================================================
 
 from backtest.engine import WalkForwardBacktest
-
-
-# ============================================================
-# 売買バックテスト
-# ============================================================
-
 from backtest.report import BacktestReport
+
+
+# ============================================================
+# 売買戦略
+# ============================================================
+
+from strategy.entry import EntryStrategy
 
 
 # ============================================================
@@ -85,7 +87,7 @@ STOCK_NAME = "アドバンテスト"
 
 
 # ============================================================
-# Streamlit
+# Streamlit設定
 # ============================================================
 
 st.set_page_config(
@@ -105,7 +107,7 @@ st.title(
 
 st.write(
     "株価・市場環境・テクニカル指標・AIを統合して、"
-    "予測とバックテストを行います。"
+    "予測・バックテスト・エントリー判断を行います。"
 )
 
 st.caption(
@@ -129,31 +131,19 @@ col1, col2, col3, col4 = st.columns(4)
 
 
 with col1:
-
-    st.success(
-        "✅ 株価"
-    )
+    st.success("✅ 株価")
 
 
 with col2:
-
-    st.success(
-        "✅ 市場"
-    )
+    st.success("✅ 市場")
 
 
 with col3:
-
-    st.success(
-        "🤖 AI"
-    )
+    st.success("🤖 AI")
 
 
 with col4:
-
-    st.success(
-        "🧪 Backtest"
-    )
+    st.success("🧪 戦略検証")
 
 
 # ============================================================
@@ -168,14 +158,14 @@ st.subheader(
 
 
 run_analysis = st.button(
-    "株価・市場・AI・バックテストを実行",
+    "株価・市場・AI・戦略分析を実行",
     type="primary",
     use_container_width=True
 )
 
 
 # ============================================================
-# 分析
+# 分析開始
 # ============================================================
 
 if run_analysis:
@@ -414,7 +404,7 @@ if run_analysis:
 
 
         # ----------------------------------------------------
-        # 市場比較
+        # 市場比較チャート
         # ----------------------------------------------------
 
         market_chart = pd.DataFrame()
@@ -458,7 +448,6 @@ if run_analysis:
                 * 100
             )
 
-
             normalized.name = market_name
 
 
@@ -492,7 +481,7 @@ if run_analysis:
             )
 
             st.caption(
-                "表示開始時点を100として比較"
+                "表示開始時点を100として比較しています。"
             )
 
             st.line_chart(
@@ -539,47 +528,53 @@ if run_analysis:
         )
 
 
-        # ----------------------------------------------------
-        # 移動平均
-        # ----------------------------------------------------
-
         col1, col2, col3 = st.columns(3)
 
 
-        for column, title, container in zip(
-            [
-                "SMA_5",
-                "SMA_25",
-                "SMA_75"
-            ],
-            [
-                "5日移動平均",
-                "25日移動平均",
-                "75日移動平均"
-            ],
-            [
-                col1,
-                col2,
-                col3
-            ]
-        ):
+        sma5 = latest_indicators.get(
+            "SMA_5"
+        )
 
-            value = latest_indicators.get(
-                column
-            )
+        sma25 = latest_indicators.get(
+            "SMA_25"
+        )
+
+        sma75 = latest_indicators.get(
+            "SMA_75"
+        )
 
 
-            with container:
+        with col1:
 
-                if pd.notna(value):
+            if pd.notna(sma5):
 
-                    st.metric(
-                        title,
-                        f"{value:,.0f} 円"
-                    )
+                st.metric(
+                    "5日移動平均",
+                    f"{sma5:,.0f} 円"
+                )
 
 
-        chart_columns = [
+        with col2:
+
+            if pd.notna(sma25):
+
+                st.metric(
+                    "25日移動平均",
+                    f"{sma25:,.0f} 円"
+                )
+
+
+        with col3:
+
+            if pd.notna(sma75):
+
+                st.metric(
+                    "75日移動平均",
+                    f"{sma75:,.0f} 円"
+                )
+
+
+        ma_columns = [
             column
             for column in [
                 "Close",
@@ -593,7 +588,7 @@ if run_analysis:
 
         st.line_chart(
             technical_data[
-                chart_columns
+                ma_columns
             ].tail(250)
         )
 
@@ -788,9 +783,11 @@ if run_analysis:
 
         for market_name in market_names:
 
-            status = market_feature_status.get(
-                market_name,
-                {}
+            status = (
+                market_feature_status.get(
+                    market_name,
+                    {}
+                )
             )
 
 
@@ -914,6 +911,7 @@ if run_analysis:
                 "auc"
             )
 
+
             st.metric(
                 "AUC",
                 (
@@ -954,13 +952,18 @@ if run_analysis:
         )
 
 
-        probability_up = prediction[
-            "probability_up"
-        ]
+        probability_up = float(
+            prediction[
+                "probability_up"
+            ]
+        )
 
-        probability_down = prediction[
-            "probability_down"
-        ]
+
+        probability_down = float(
+            prediction[
+                "probability_down"
+            ]
+        )
 
 
         col1, col2 = st.columns(2)
@@ -1008,6 +1011,11 @@ if run_analysis:
             )
 
 
+        st.caption(
+            "このAI確率は⑪のエントリー判断にも使用します。"
+        )
+
+
     except Exception as e:
 
         st.error(
@@ -1030,50 +1038,66 @@ if run_analysis:
     )
 
 
-    importance = ai_model.get_feature_importance()
+    try:
+
+        importance = (
+            ai_model
+            .get_feature_importance()
+        )
 
 
-    importance_display = importance.copy()
+        importance_display = (
+            importance.copy()
+        )
 
 
-    importance_display[
-        "importance"
-    ] *= 100
+        importance_display[
+            "importance"
+        ] *= 100
 
 
-    importance_display.rename(
-        columns={
-            "feature":
-                "特徴量",
+        importance_display.rename(
+            columns={
+                "feature":
+                    "特徴量",
 
-            "importance":
-                "重要度（%）"
-        },
-        inplace=True
-    )
-
-
-    top_importance = (
-        importance_display
-        .head(15)
-    )
+                "importance":
+                    "重要度（%）"
+            },
+            inplace=True
+        )
 
 
-    st.dataframe(
-        top_importance,
-        use_container_width=True,
-        hide_index=True
-    )
+        top_importance = (
+            importance_display
+            .head(15)
+        )
 
 
-    st.bar_chart(
-        top_importance
-        .set_index(
-            "特徴量"
-        )[
-            ["重要度（%）"]
-        ]
-    )
+        st.dataframe(
+            top_importance,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+        st.bar_chart(
+            top_importance
+            .set_index(
+                "特徴量"
+            )[
+                ["重要度（%）"]
+            ]
+        )
+
+
+    except Exception as e:
+
+        st.warning(
+            "特徴量重要度を表示できませんでした。"
+        )
+
+        st.exception(e)
 
 
     # ========================================================
@@ -1087,67 +1111,83 @@ if run_analysis:
     )
 
 
-    test_results = ai_model.get_test_results()
+    try:
 
-
-    if (
-        test_results is not None
-        and not test_results.empty
-    ):
-
-        display_test = test_results.copy()
-
-
-        display_test[
-            "上昇確率（%）"
-        ] = (
-            display_test[
-                "Probability_Up"
-            ]
-            * 100
+        test_results = (
+            ai_model
+            .get_test_results()
         )
 
 
-        display_test[
-            "実際"
-        ] = (
-            display_test[
-                "Actual"
-            ]
-            .map(
-                {
-                    1: "上昇",
-                    0: "下落"
-                }
+        if (
+            test_results is not None
+            and not test_results.empty
+        ):
+
+            display_test = (
+                test_results.copy()
             )
-        )
 
 
-        display_test[
-            "AI予測"
-        ] = (
             display_test[
-                "Prediction"
-            ]
-            .map(
-                {
-                    1: "上昇",
-                    0: "下落"
-                }
-            )
-        )
-
-
-        st.dataframe(
-            display_test[
-                [
-                    "実際",
-                    "AI予測",
-                    "上昇確率（%）"
+                "上昇確率（%）"
+            ] = (
+                display_test[
+                    "Probability_Up"
                 ]
-            ].tail(50),
-            use_container_width=True
+                * 100
+            )
+
+
+            display_test[
+                "実際"
+            ] = (
+                display_test[
+                    "Actual"
+                ]
+                .map(
+                    {
+                        1: "上昇",
+                        0: "下落"
+                    }
+                )
+            )
+
+
+            display_test[
+                "AI予測"
+            ] = (
+                display_test[
+                    "Prediction"
+                ]
+                .map(
+                    {
+                        1: "上昇",
+                        0: "下落"
+                    }
+                )
+            )
+
+
+            st.dataframe(
+                display_test[
+                    [
+                        "実際",
+                        "AI予測",
+                        "上昇確率（%）"
+                    ]
+                ].tail(50),
+                use_container_width=True
+            )
+
+
+    except Exception as e:
+
+        st.warning(
+            "固定テスト結果を表示できませんでした。"
         )
+
+        st.exception(e)
 
 
     # ========================================================
@@ -1167,11 +1207,13 @@ if run_analysis:
             "ウォークフォワード検証中..."
         ):
 
-            walk_forward = WalkForwardBacktest(
-                initial_train_size=500,
-                test_size=20,
-                retrain_every=20,
-                threshold=0.50
+            walk_forward = (
+                WalkForwardBacktest(
+                    initial_train_size=500,
+                    test_size=20,
+                    retrain_every=20,
+                    threshold=0.50
+                )
             )
 
 
@@ -1202,9 +1244,12 @@ if run_analysis:
 
         with col2:
 
-            walk_auc = walk_metrics.get(
-                "auc"
+            walk_auc = (
+                walk_metrics.get(
+                    "auc"
+                )
             )
+
 
             st.metric(
                 "AUC",
@@ -1224,48 +1269,21 @@ if run_analysis:
             )
 
 
-        col1, col2, col3 = st.columns(3)
-
-
-        with col1:
-
-            st.metric(
-                "Precision",
-                f"{walk_metrics.get('precision', 0) * 100:.2f}%"
+        high_accuracy = (
+            walk_metrics.get(
+                "high_confidence_accuracy"
             )
+        )
 
-
-        with col2:
-
-            st.metric(
-                "Recall",
-                f"{walk_metrics.get('recall', 0) * 100:.2f}%"
+        high_return = (
+            walk_metrics.get(
+                "high_confidence_return"
             )
+        )
 
-
-        with col3:
-
-            st.metric(
-                "F1",
-                f"{walk_metrics.get('f1', 0) * 100:.2f}%"
-            )
-
-
-        # ----------------------------------------------------
-        # 60%以上
-        # ----------------------------------------------------
 
         st.subheader(
             "🎯 上昇確率60%以上"
-        )
-
-
-        high_accuracy = walk_metrics.get(
-            "high_confidence_accuracy"
-        )
-
-        high_return = walk_metrics.get(
-            "high_confidence_return"
         )
 
 
@@ -1307,76 +1325,6 @@ if run_analysis:
             )
 
 
-        # ----------------------------------------------------
-        # 確率チャート
-        # ----------------------------------------------------
-
-        probability_chart = walk_results[
-            ["Probability_Up"]
-        ].copy()
-
-
-        probability_chart[
-            "Probability_Up"
-        ] *= 100
-
-
-        probability_chart.rename(
-            columns={
-                "Probability_Up":
-                    "上昇確率（%）"
-            },
-            inplace=True
-        )
-
-
-        st.line_chart(
-            probability_chart
-        )
-
-
-        with st.expander(
-            "ウォークフォワード予測を見る"
-        ):
-
-            walk_display = walk_results.copy()
-
-
-            walk_display[
-                "上昇確率（%）"
-            ] = (
-                walk_display[
-                    "Probability_Up"
-                ]
-                * 100
-            )
-
-
-            walk_display[
-                "翌日騰落率（%）"
-            ] = (
-                walk_display[
-                    "Next_Return"
-                ]
-                * 100
-            )
-
-
-            st.dataframe(
-                walk_display[
-                    [
-                        "Close",
-                        "Next_Close",
-                        "Probability_Up",
-                        "上昇確率（%）",
-                        "翌日騰落率（%）",
-                        "Correct"
-                    ]
-                ].tail(50),
-                use_container_width=True
-            )
-
-
     except Exception as e:
 
         st.error(
@@ -1399,31 +1347,20 @@ if run_analysis:
     )
 
 
-    st.write(
-        "ウォークフォワードAIの上昇確率が60%以上の場合、"
-        "次の営業日の寄り付きで購入し、"
-        "その日の終値で売却したと仮定します。"
-    )
-
-
-    st.caption(
-        "初期資金100万円 / 100株単位 / "
-        "売買手数料0.1% / スリッページ0.1%"
-    )
-
-
     try:
 
         with st.spinner(
             "売買バックテストを実行しています..."
         ):
 
-            backtest_report = BacktestReport(
-                initial_capital=1_000_000,
-                lot_size=100,
-                entry_threshold=0.60,
-                commission_rate=0.001,
-                slippage_rate=0.001
+            backtest_report = (
+                BacktestReport(
+                    initial_capital=1_000_000,
+                    lot_size=100,
+                    entry_threshold=0.60,
+                    commission_rate=0.001,
+                    slippage_rate=0.001
+                )
             )
 
 
@@ -1442,35 +1379,9 @@ if run_analysis:
         )
 
 
-        # ====================================================
-        # 資産結果
-        # ====================================================
-
-        st.subheader(
-            "💴 資産結果"
-        )
-
-
-        initial_capital = backtest_metrics.get(
-            "initial_capital",
-            0
-        )
-
-        final_capital = backtest_metrics.get(
-            "final_capital",
-            0
-        )
-
-        total_profit = backtest_metrics.get(
-            "total_profit",
-            0
-        )
-
-        total_return = backtest_metrics.get(
-            "total_return",
-            0
-        )
-
+        # ----------------------------------------------------
+        # 資産
+        # ----------------------------------------------------
 
         col1, col2 = st.columns(2)
 
@@ -1479,11 +1390,26 @@ if run_analysis:
 
             st.metric(
                 "初期資金",
-                f"{initial_capital:,.0f} 円"
+                f"{backtest_metrics.get('initial_capital', 0):,.0f} 円"
             )
 
 
         with col2:
+
+            final_capital = (
+                backtest_metrics.get(
+                    "final_capital",
+                    0
+                )
+            )
+
+            total_profit = (
+                backtest_metrics.get(
+                    "total_profit",
+                    0
+                )
+            )
+
 
             st.metric(
                 "最終資産",
@@ -1494,18 +1420,43 @@ if run_analysis:
             )
 
 
-        col1, col2 = st.columns(2)
+        # ----------------------------------------------------
+        # 成績
+        # ----------------------------------------------------
+
+        total_return = (
+            backtest_metrics.get(
+                "total_return",
+                0
+            )
+        )
+
+        win_rate = (
+            backtest_metrics.get(
+                "win_rate"
+            )
+        )
+
+        profit_factor = (
+            backtest_metrics.get(
+                "profit_factor"
+            )
+        )
+
+        max_drawdown = (
+            backtest_metrics.get(
+                "max_drawdown",
+                0
+            )
+        )
+
+
+        col1, col2, col3, col4 = (
+            st.columns(4)
+        )
 
 
         with col1:
-
-            st.metric(
-                "総損益",
-                f"{total_profit:+,.0f} 円"
-            )
-
-
-        with col2:
 
             st.metric(
                 "総リターン",
@@ -1513,63 +1464,7 @@ if run_analysis:
             )
 
 
-        # ====================================================
-        # 取引成績
-        # ====================================================
-
-        st.subheader(
-            "📊 取引成績"
-        )
-
-
-        trade_count = backtest_metrics.get(
-            "trades",
-            0
-        )
-
-        wins = backtest_metrics.get(
-            "wins",
-            0
-        )
-
-        losses = backtest_metrics.get(
-            "losses",
-            0
-        )
-
-        win_rate = backtest_metrics.get(
-            "win_rate"
-        )
-
-
-        col1, col2, col3, col4 = st.columns(4)
-
-
-        with col1:
-
-            st.metric(
-                "取引回数",
-                f"{trade_count:,}"
-            )
-
-
         with col2:
-
-            st.metric(
-                "勝ち",
-                f"{wins:,}"
-            )
-
-
-        with col3:
-
-            st.metric(
-                "負け",
-                f"{losses:,}"
-            )
-
-
-        with col4:
 
             st.metric(
                 "勝率",
@@ -1581,39 +1476,7 @@ if run_analysis:
             )
 
 
-        # ====================================================
-        # リスク / 効率
-        # ====================================================
-
-        st.subheader(
-            "⚖️ リスク・効率"
-        )
-
-
-        profit_factor = backtest_metrics.get(
-            "profit_factor"
-        )
-
-        max_drawdown = backtest_metrics.get(
-            "max_drawdown",
-            0
-        )
-
-        average_profit = backtest_metrics.get(
-            "average_profit"
-        )
-
-        average_profit_rate = (
-            backtest_metrics.get(
-                "average_profit_rate"
-            )
-        )
-
-
-        col1, col2 = st.columns(2)
-
-
-        with col1:
+        with col3:
 
             st.metric(
                 "Profit Factor",
@@ -1625,7 +1488,7 @@ if run_analysis:
             )
 
 
-        with col2:
+        with col4:
 
             st.metric(
                 "最大ドローダウン",
@@ -1633,120 +1496,18 @@ if run_analysis:
             )
 
 
-        col1, col2 = st.columns(2)
-
-
-        with col1:
-
-            st.metric(
-                "1取引平均損益",
-                (
-                    f"{average_profit:+,.0f} 円"
-                    if average_profit is not None
-                    else "取引なし"
-                )
-            )
-
-
-        with col2:
-
-            st.metric(
-                "1取引平均リターン",
-                (
-                    f"{average_profit_rate * 100:+.3f}%"
-                    if average_profit_rate is not None
-                    else "取引なし"
-                )
-            )
-
-
-        # ====================================================
-        # ベスト / ワースト
-        # ====================================================
-
-        if trade_count > 0:
-
-            best_trade = backtest_metrics.get(
-                "best_trade",
-                0
-            )
-
-            worst_trade = backtest_metrics.get(
-                "worst_trade",
-                0
-            )
-
-
-            col1, col2 = st.columns(2)
-
-
-            with col1:
-
-                st.metric(
-                    "最大1取引利益",
-                    f"{best_trade:+,.0f} 円"
-                )
-
-
-            with col2:
-
-                st.metric(
-                    "最大1取引損失",
-                    f"{worst_trade:+,.0f} 円"
-                )
-
-
-        # ====================================================
-        # 取引コスト
-        # ====================================================
-
-        st.subheader(
-            "💸 取引コスト"
-        )
-
-
-        total_commission = (
+        st.metric(
+            "取引回数",
             backtest_metrics.get(
-                "total_commission",
-                0
-            )
-        )
-
-        total_slippage = (
-            backtest_metrics.get(
-                "total_slippage",
+                "trades",
                 0
             )
         )
 
 
-        col1, col2 = st.columns(2)
-
-
-        with col1:
-
-            st.metric(
-                "総手数料",
-                f"{total_commission:,.0f} 円"
-            )
-
-
-        with col2:
-
-            st.metric(
-                "推定スリッページ",
-                f"{total_slippage:,.0f} 円"
-            )
-
-
-        # ====================================================
+        # ----------------------------------------------------
         # Buy & Hold比較
-        # ====================================================
-
-        st.subheader(
-            "📈 AI戦略 vs Buy & Hold"
-        )
-
+        # ----------------------------------------------------
 
         buy_hold_return = (
             backtest_metrics.get(
@@ -1825,177 +1586,473 @@ if run_analysis:
             )
 
 
-        # ====================================================
-        # ドローダウン
-        # ====================================================
+        # ----------------------------------------------------
+        # 取引履歴
+        # ----------------------------------------------------
 
-        if (
-            equity_curve is not None
-            and not equity_curve.empty
-            and "Drawdown" in equity_curve.columns
+        with st.expander(
+            "バックテスト取引履歴を見る"
         ):
 
-            st.subheader(
-                "📉 ドローダウン"
-            )
+            if (
+                trades is None
+                or trades.empty
+            ):
+
+                st.warning(
+                    "取引がありません。"
+                )
+
+            else:
+
+                trade_display = (
+                    trades.copy()
+                )
 
 
-            drawdown_chart = (
-                equity_curve[
-                    ["Drawdown"]
-                ].copy()
-            )
+                trade_display[
+                    "上昇確率（%）"
+                ] = (
+                    trade_display[
+                        "Probability_Up"
+                    ]
+                    * 100
+                )
 
 
-            drawdown_chart[
-                "Drawdown"
-            ] *= 100
+                trade_display[
+                    "損益率（%）"
+                ] = (
+                    trade_display[
+                        "Profit_Rate"
+                    ]
+                    * 100
+                )
 
 
-            drawdown_chart.rename(
-                columns={
-                    "Drawdown":
-                        "ドローダウン（%）"
-                },
-                inplace=True
-            )
+                st.dataframe(
+                    trade_display[
+                        [
+                            "Signal_Date",
+                            "Trade_Date",
+                            "上昇確率（%）",
+                            "Buy_Price",
+                            "Sell_Price",
+                            "Shares",
+                            "Profit",
+                            "損益率（%）",
+                            "Capital_After"
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True
+                )
 
 
-            st.line_chart(
-                drawdown_chart
-            )
+    except Exception as e:
+
+        st.error(
+            "❌ 売買バックテストエラー"
+        )
+
+        st.exception(e)
 
 
-        # ====================================================
-        # 取引履歴
-        # ====================================================
+    # ========================================================
+    # ⑪ AIエントリー判断
+    # ========================================================
 
-        st.subheader(
-            "📋 取引履歴"
+    st.divider()
+
+    st.header(
+        "⑪ 🎯 AIエントリー判断"
+    )
+
+
+    st.write(
+        "最新のAI上昇確率・トレンド・RSI・MACD・"
+        "出来高・市場環境を組み合わせて、"
+        "BUY / WAITを判定します。"
+    )
+
+
+    try:
+
+        # ----------------------------------------------------
+        # エントリー戦略
+        # ----------------------------------------------------
+
+        entry_strategy = EntryStrategy(
+            minimum_score=6,
+            minimum_probability=0.55,
+            strong_probability=0.60,
+            rsi_min=40.0,
+            rsi_max=70.0,
+            volume_ratio_min=1.0
         )
 
 
-        if (
-            trades is None
-            or trades.empty
-        ):
+        # ----------------------------------------------------
+        # 最新日の判定
+        # ----------------------------------------------------
 
-            st.warning(
-                "条件を満たす取引がありませんでした。"
+        entry_result = (
+            entry_strategy.evaluate_latest(
+                data=ai_data,
+                probability_up=probability_up
+            )
+        )
+
+
+        entry_action = (
+            entry_result[
+                "action"
+            ]
+        )
+
+        entry_score = (
+            entry_result[
+                "score"
+            ]
+        )
+
+        max_score = (
+            entry_result[
+                "max_score"
+            ]
+        )
+
+        score_rate = (
+            entry_result[
+                "score_rate"
+            ]
+        )
+
+        minimum_score = (
+            entry_result[
+                "minimum_score"
+            ]
+        )
+
+        entry_probability = (
+            entry_result[
+                "probability_up"
+            ]
+        )
+
+        minimum_probability = (
+            entry_result[
+                "minimum_probability"
+            ]
+        )
+
+        entry_summary = (
+            entry_result[
+                "summary"
+            ]
+        )
+
+        entry_reasons = (
+            entry_result[
+                "reasons"
+            ]
+        )
+
+        entry_details = (
+            entry_result[
+                "details"
+            ]
+        )
+
+        entry_date = (
+            entry_result.get(
+                "date"
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # 判定日
+        # ----------------------------------------------------
+
+        if entry_date is not None:
+
+            try:
+
+                st.caption(
+                    "判定データ日："
+                    f"{pd.Timestamp(entry_date).strftime('%Y-%m-%d')}"
+                )
+
+            except Exception:
+
+                pass
+
+
+        # ====================================================
+        # BUY / WAIT 大表示
+        # ====================================================
+
+        if entry_action == "BUY":
+
+            st.success(
+                "🟢 エントリー判断：BUY"
             )
 
         else:
 
-            trade_display = trades.copy()
-
-
-            trade_display[
-                "上昇確率（%）"
-            ] = (
-                trade_display[
-                    "Probability_Up"
-                ]
-                * 100
+            st.warning(
+                "🟡 エントリー判断：WAIT"
             )
 
 
-            trade_display[
-                "損益率（%）"
-            ] = (
-                trade_display[
-                    "Profit_Rate"
-                ]
-                * 100
-            )
+        st.write(
+            entry_summary
+        )
 
 
-            trade_display[
-                "勝敗"
-            ] = (
-                trade_display[
-                    "Win"
-                ]
-                .map(
-                    {
-                        True: "勝ち",
-                        False: "負け"
-                    }
+        # ====================================================
+        # メイン指標
+        # ====================================================
+
+        col1, col2, col3 = st.columns(3)
+
+
+        with col1:
+
+            st.metric(
+                "AI上昇確率",
+                f"{entry_probability * 100:.2f}%",
+                delta=(
+                    "基準 "
+                    f"{minimum_probability * 100:.0f}%以上"
                 )
             )
 
 
-            st.dataframe(
-                trade_display[
-                    [
-                        "Signal_Date",
-                        "Trade_Date",
-                        "上昇確率（%）",
-                        "Open",
-                        "Buy_Price",
-                        "Close",
-                        "Sell_Price",
-                        "Shares",
-                        "Profit",
-                        "損益率（%）",
-                        "勝敗",
-                        "Capital_After"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True
+        with col2:
+
+            st.metric(
+                "総合スコア",
+                f"{entry_score} / {max_score}",
+                delta=(
+                    f"BUY基準 {minimum_score}点以上"
+                )
+            )
+
+
+        with col3:
+
+            st.metric(
+                "スコア率",
+                f"{score_rate * 100:.1f}%"
+            )
+
+
+        # ----------------------------------------------------
+        # スコア表示
+        # ----------------------------------------------------
+
+        st.write(
+            "総合スコア"
+        )
+
+
+        st.progress(
+            min(
+                max(
+                    score_rate,
+                    0.0
+                ),
+                1.0
+            )
+        )
+
+
+        # ====================================================
+        # スコア内訳
+        # ====================================================
+
+        st.subheader(
+            "📊 エントリースコア内訳"
+        )
+
+
+        score_breakdown = pd.DataFrame(
+            [
+                {
+                    "判定項目":
+                        "AI上昇確率",
+
+                    "獲得点":
+                        entry_details.get(
+                            "ai_score",
+                            0
+                        ),
+
+                    "最大点":
+                        3
+                },
+
+                {
+                    "判定項目":
+                        "トレンド",
+
+                    "獲得点":
+                        entry_details.get(
+                            "trend_score",
+                            0
+                        ),
+
+                    "最大点":
+                        3
+                },
+
+                {
+                    "判定項目":
+                        "RSI",
+
+                    "獲得点":
+                        entry_details.get(
+                            "rsi_score",
+                            0
+                        ),
+
+                    "最大点":
+                        1
+                },
+
+                {
+                    "判定項目":
+                        "MACD",
+
+                    "獲得点":
+                        entry_details.get(
+                            "macd_score",
+                            0
+                        ),
+
+                    "最大点":
+                        1
+                },
+
+                {
+                    "判定項目":
+                        "出来高",
+
+                    "獲得点":
+                        entry_details.get(
+                            "volume_score",
+                            0
+                        ),
+
+                    "最大点":
+                        1
+                },
+
+                {
+                    "判定項目":
+                        "市場環境",
+
+                    "獲得点":
+                        entry_details.get(
+                            "market_score",
+                            0
+                        ),
+
+                    "最大点":
+                        4
+                }
+            ]
+        )
+
+
+        score_breakdown[
+            "達成率（%）"
+        ] = (
+            score_breakdown[
+                "獲得点"
+            ]
+            / score_breakdown[
+                "最大点"
+            ]
+            * 100
+        )
+
+
+        st.dataframe(
+            score_breakdown,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+        # ====================================================
+        # 判定理由
+        # ====================================================
+
+        st.subheader(
+            "🔍 判定理由"
+        )
+
+
+        for reason in entry_reasons:
+
+            st.write(
+                f"・{reason}"
             )
 
 
         # ====================================================
-        # バックテスト条件
+        # 条件
         # ====================================================
 
         with st.expander(
-            "バックテスト条件を見る"
+            "現在のエントリー条件を見る"
         ):
 
             st.write(
-                "初期資金：1,000,000円"
+                "AI上昇確率：55%以上が必須"
             )
 
             st.write(
-                "売買単位：100株"
+                "AI上昇確率60%以上：強い評価"
             )
 
             st.write(
-                "AIエントリー基準：上昇確率60%以上"
+                "AI上昇確率70%以上：さらに高い評価"
             )
 
             st.write(
-                "購入：シグナル翌営業日の寄り付き"
+                "総合スコア：6点以上が必須"
             )
 
             st.write(
-                "売却：購入日の終値"
+                "RSI適正範囲：40〜70"
             )
 
             st.write(
-                "手数料：片道0.1%"
+                "出来高比率：1.0倍以上で加点"
             )
 
             st.write(
-                "スリッページ：片道0.1%"
+                "移動平均：株価・5日線・25日線・75日線を評価"
             )
 
             st.write(
-                "信用取引：使用しない"
+                "市場環境：日経平均・NASDAQ・SOXX・ドル円を評価"
             )
 
 
         st.success(
-            "🎉 正式な売買バックテストまで正常に完了しました。"
+            "🎉 AIエントリー判断まで正常に完了しました。"
         )
 
 
     except Exception as e:
 
         st.error(
-            "❌ 売買バックテスト中にエラーが発生しました。"
+            "❌ AIエントリー判断中にエラーが発生しました。"
         )
 
         st.exception(e)
@@ -2039,13 +2096,13 @@ development_status = {
         "✅ 完了",
 
     "売買バックテスト":
+        "✅ 完了",
+
+    "エントリー判断":
         "✅ 今回追加",
 
-    "エントリー戦略":
+    "売却判断":
         "🔵 次の段階",
-
-    "売却戦略":
-        "🔵 未実装",
 
     "リスク管理":
         "🔵 未実装",
@@ -2080,16 +2137,15 @@ st.dataframe(
 st.divider()
 
 st.caption(
-    "AI予測・ウォークフォワード検証・バックテストは、"
-    "将来の利益を保証するものではありません。"
+    "BUY / WAITはプログラム上の検証用シグナルです。"
+    "実際の投資判断や利益を保証するものではありません。"
 )
 
 st.caption(
-    "バックテストの手数料・スリッページは仮定値です。"
-    "実際の証券会社の条件とは異なる場合があります。"
+    "現在のエントリースコアや55%・6点などの基準値は"
+    "初期設定であり、今後バックテストで検証します。"
 )
 
 st.caption(
-    "現在は検証段階であり、"
-    "実際の売買注文は一切行いません。"
+    "現在は検証段階です。実際の売買注文は行いません。"
 )
