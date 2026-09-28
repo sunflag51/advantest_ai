@@ -1,5 +1,5 @@
 # ============================================================ 
-# main.py v4.1 
+# main.py v4.2 
 # 
 # アドバンテスト AI分析システム 
 # 
@@ -81,7 +81,7 @@ DATA_INTERVAL = "1d"
 # AIターゲット仕様変更のためv4 
 # ============================================================ 
  
-CACHE_VERSION = "v4.1" 
+CACHE_VERSION = "v4.2" 
  
  
 # ============================================================ 
@@ -665,10 +665,23 @@ def cached_walk_forward(
     ) 
  
  
-    return ( 
-        results, 
-        metrics, 
-        training_log, 
+    
+    try:
+        calibration_table = backtest.get_calibration_table()
+    except Exception:
+        calibration_table = pd.DataFrame()
+
+    try:
+        stability_table = backtest.get_stability_table()
+    except Exception:
+        stability_table = pd.DataFrame()
+
+    return (
+        results,
+        metrics,
+        training_log,
+        calibration_table,
+        stability_table,
     ) 
  
  
@@ -875,7 +888,14 @@ SESSION_DEFAULTS = {
     "walk_training_log": 
         None, 
  
-    "old_trades": 
+    
+    "walk_calibration_table":
+        None,
+
+    "walk_stability_table":
+        None,
+
+"old_trades": 
         None, 
  
     "old_equity": 
@@ -1373,6 +1393,8 @@ def run_or_restore_base_analysis():
             walk_results, 
             walk_metrics, 
             walk_training_log, 
+                    walk_calibration_table,
+            walk_stability_table,
         ) = cached_walk_forward( 
  
             ai_data, 
@@ -1401,7 +1423,16 @@ def run_or_restore_base_analysis():
         ] = walk_training_log 
  
  
-        # ==================================================== 
+        
+
+        st.session_state[
+            "walk_calibration_table"
+        ] = walk_calibration_table
+
+        st.session_state[
+            "walk_stability_table"
+        ] = walk_stability_table
+# ==================================================== 
         # ⑩ 
         # ==================================================== 
  
@@ -1773,6 +1804,20 @@ walk_training_log = (
     ] 
 ) 
  
+
+
+walk_calibration_table = (
+    st.session_state[
+        "walk_calibration_table"
+    ]
+)
+
+walk_stability_table = (
+    st.session_state[
+        "walk_stability_table"
+    ]
+)
+
 old_trades = ( 
     st.session_state[ 
         "old_trades" 
@@ -2522,6 +2567,183 @@ if (
         "確率帯別の件数・実際上昇率・"
         "将来リターンを確認できます。"
     )
+
+
+# ============================================================
+# v2.4 初心者向け表示
+# ============================================================
+
+st.subheader("🔰 AIの安全チェック")
+
+leakage_ok = (
+    walk_metrics.get(
+        "leakage_check_all_passed"
+    )
+    if walk_metrics
+    else None
+)
+
+if leakage_ok is True:
+    st.success(
+        "未来情報チェック：OK\n\n"
+        "AIが、まだ分からない未来の答えを"
+        "使って学習していないことを確認しました。"
+    )
+elif leakage_ok is False:
+    st.error(
+        "未来情報チェック：要確認\n\n"
+        "未来の情報が学習に混ざっている可能性があります。"
+        "この状態ではバックテスト結果を信用せず、"
+        "プログラムを確認します。"
+    )
+else:
+    st.info(
+        "未来情報チェック：結果なし"
+    )
+
+brier = safe_float(
+    walk_metrics.get("brier_score")
+    if walk_metrics
+    else None
+)
+
+st.write("**AIが出す確率のズレを確認**")
+
+if brier is not None:
+    st.metric(
+        "Brier Score",
+        f"{brier:.3f}",
+    )
+    st.caption(
+        "0に近いほど、AIが出す確率と"
+        "実際の結果が合っています。"
+        "この数字だけでは判断せず、"
+        "下の表と一緒に確認します。"
+    )
+else:
+    st.write("Brier Score：N/A")
+
+
+if (
+    walk_calibration_table is not None
+    and isinstance(
+        walk_calibration_table,
+        pd.DataFrame,
+    )
+    and not walk_calibration_table.empty
+):
+    st.subheader(
+        "🔰 AIの『○%』は本当に当たっている？"
+    )
+
+    calibration_display = (
+        walk_calibration_table.copy()
+        .rename(
+            columns={
+                "Probability_Band": "AI確率帯",
+                "Count": "件数",
+                "Average_Predicted_Probability": "AI平均確率",
+                "Actual_Up_Rate": "実際上昇率",
+                "Average_Future_Return": "平均リターン",
+                "Median_Future_Return": "中央値リターン",
+            }
+        )
+    )
+
+    if "Period" in calibration_display.columns:
+        calibration_display = calibration_display.drop(
+            columns=["Period"]
+        )
+
+    for column in [
+        "AI平均確率",
+        "実際上昇率",
+        "平均リターン",
+        "中央値リターン",
+    ]:
+        if column in calibration_display.columns:
+            calibration_display[column] = (
+                calibration_display[column].apply(
+                    lambda value: (
+                        f"{float(value) * 100:+.2f}%"
+                        if pd.notna(value)
+                        else "N/A"
+                    )
+                )
+            )
+
+    st.dataframe(
+        calibration_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "例：AI平均確率が60%なのに"
+        "実際上昇率が40%なら、"
+        "AIの『60%』をそのまま信用しにくい、"
+        "という見方をします。"
+    )
+
+
+if (
+    walk_stability_table is not None
+    and isinstance(
+        walk_stability_table,
+        pd.DataFrame,
+    )
+    and not walk_stability_table.empty
+):
+    st.subheader(
+        "🔰 昔と最近で同じ傾向か？"
+    )
+
+    stability_display = (
+        walk_stability_table.copy()
+        .rename(
+            columns={
+                "Period": "期間",
+                "Probability_Band": "AI確率帯",
+                "Count": "件数",
+                "Average_Predicted_Probability": "AI平均確率",
+                "Actual_Up_Rate": "実際上昇率",
+                "Average_Future_Return": "平均リターン",
+                "Median_Future_Return": "中央値リターン",
+            }
+        )
+    )
+
+    for column in [
+        "AI平均確率",
+        "実際上昇率",
+        "平均リターン",
+        "中央値リターン",
+    ]:
+        if column in stability_display.columns:
+            stability_display[column] = (
+                stability_display[column].apply(
+                    lambda value: (
+                        f"{float(value) * 100:+.2f}%"
+                        if pd.notna(value)
+                        else "N/A"
+                    )
+                )
+            )
+
+    st.dataframe(
+        stability_display,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "前半と後半の両方で似た結果なら、"
+        "一時期だけ偶然うまくいった可能性が"
+        "少し下がります。"
+        "前半だけ良く、後半で悪くなっている場合は"
+        "注意して見ます。"
+    )
+
 
 if (
     walk_training_log is not None
