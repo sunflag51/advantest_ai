@@ -2,30 +2,36 @@
 # backtest/trading_engine.py
 #
 # 本格戦略バックテストエンジン
+# 会計監査対応 完全版 v4
 #
-# Version 3
-#
-# 改善点
 # ------------------------------------------------------------
-# ・BUY / SELL はシグナル翌営業日の始値で約定
-# ・未来情報を使わない
-# ・買いスリッページを明示計算
-# ・売りスリッページを明示計算
-# ・買い手数料を明示計算
-# ・売り手数料を明示計算
-# ・純損益を約定金額ベースで厳密計算
-# ・RiskManagerのcommissionキーに依存しない
-# ・売買履歴に全コストを記録
-# ・資産曲線を毎日記録
-# ・資金不足BUYを記録
-# ・注文ログを記録
-# ・最終日に保有株があれば強制決済
+# 約定ルール
+# ・当日終値でBUY / SELL判定
+# ・翌営業日の始値で約定
+#
+# コスト
+# ・BUY  : 始値 × (1 + スリッページ率)
+# ・SELL : 始値 × (1 - スリッページ率)
+# ・BUY手数料  = BUY約定金額 × 手数料率
+# ・SELL手数料 = SELL約定金額 × 手数料率
+#
+# 純損益
+# ・売却手取額
+#   - 購入代金
+#   - BUY手数料
+#
+# 会計監査
+# ・全取引Net_Profit合計
+# ・勝ち利益 - 負け損失
+# ・最終資産 - 初期資金
+# ・3経路を相互照合
+# ・BUY/SELL手数料を個別集計
+# ・BUY/SELLスリッページを個別集計
 # ============================================================
 
 
 import numpy as np
 import pandas as pd
-
 
 from strategy.entry import EntryStrategy
 from strategy.exit import ExitStrategy
@@ -62,7 +68,7 @@ class TradingBacktestEngine:
     ):
 
         # ====================================================
-        # 基本
+        # 基本設定
         # ====================================================
 
         self.initial_capital = float(
@@ -149,7 +155,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 保存
+        # 結果保存
         # ====================================================
 
         self.trades = pd.DataFrame()
@@ -164,7 +170,7 @@ class TradingBacktestEngine:
 
 
     # ========================================================
-    # float安全変換
+    # 安全なfloat変換
     # ========================================================
 
     @staticmethod
@@ -229,6 +235,7 @@ class TradingBacktestEngine:
             if not np.isfinite(
                 number
             ):
+
                 return default
 
             return number
@@ -243,7 +250,9 @@ class TradingBacktestEngine:
     # ========================================================
 
     @staticmethod
-    def _prepare_index(data):
+    def _prepare_index(
+        data,
+    ):
 
         result = data.copy()
 
@@ -268,9 +277,7 @@ class TradingBacktestEngine:
             )
         ]
 
-        result = result.sort_index()
-
-        return result
+        return result.sort_index()
 
 
     # ========================================================
@@ -284,17 +291,29 @@ class TradingBacktestEngine:
         walk_results,
     ):
 
-        if stock_data is None:
+        if (
+            stock_data is None
+            or stock_data.empty
+        ):
+
             raise ValueError(
                 "stock_data がありません。"
             )
 
-        if ai_data is None:
+        if (
+            ai_data is None
+            or ai_data.empty
+        ):
+
             raise ValueError(
                 "ai_data がありません。"
             )
 
-        if walk_results is None:
+        if (
+            walk_results is None
+            or walk_results.empty
+        ):
+
             raise ValueError(
                 "walk_results がありません。"
             )
@@ -313,16 +332,13 @@ class TradingBacktestEngine:
         )
 
 
-        # ====================================================
-        # 株価必須列
-        # ====================================================
-
         required_stock = [
             "Open",
             "High",
             "Low",
             "Close",
         ]
+
 
         missing_stock = [
 
@@ -332,6 +348,7 @@ class TradingBacktestEngine:
 
             if column not in stock.columns
         ]
+
 
         if missing_stock:
 
@@ -343,10 +360,6 @@ class TradingBacktestEngine:
             )
 
 
-        # ====================================================
-        # 予測必須列
-        # ====================================================
-
         if (
             "Probability_Up"
             not in predictions.columns
@@ -357,10 +370,6 @@ class TradingBacktestEngine:
                 "Probability_Up がありません。"
             )
 
-
-        # ====================================================
-        # 数値化
-        # ====================================================
 
         for column in required_stock:
 
@@ -397,20 +406,6 @@ class TradingBacktestEngine:
         )
 
 
-        if stock.empty:
-
-            raise ValueError(
-                "有効な株価データがありません。"
-            )
-
-
-        if predictions.empty:
-
-            raise ValueError(
-                "有効なAI予測データがありません。"
-            )
-
-
         return (
             stock,
             features,
@@ -431,13 +426,11 @@ class TradingBacktestEngine:
         if date not in predictions.index:
             return None
 
-        value = predictions.loc[
-            date,
-            "Probability_Up",
-        ]
-
         return self._safe_float(
-            value
+            predictions.loc[
+                date,
+                "Probability_Up",
+            ]
         )
 
 
@@ -490,21 +483,15 @@ class TradingBacktestEngine:
 
     # ========================================================
     # BUY約定価格
-    #
-    # 買いでは不利方向に価格を上げる
     # ========================================================
 
     def calculate_buy_price(
         self,
-        market_open,
+        market_price,
     ):
 
-        market_open = float(
-            market_open
-        )
-
         return (
-            market_open
+            float(market_price)
             * (
                 1.0
                 + self.slippage_rate
@@ -514,21 +501,15 @@ class TradingBacktestEngine:
 
     # ========================================================
     # SELL約定価格
-    #
-    # 売りでは不利方向に価格を下げる
     # ========================================================
 
     def calculate_sell_price(
         self,
-        market_open,
+        market_price,
     ):
 
-        market_open = float(
-            market_open
-        )
-
         return (
-            market_open
+            float(market_price)
             * (
                 1.0
                 - self.slippage_rate
@@ -542,23 +523,77 @@ class TradingBacktestEngine:
 
     def calculate_commission(
         self,
-        price,
+        execution_price,
         shares,
     ):
 
-        trade_value = (
-            float(price)
-            * int(shares)
-        )
-
         return (
-            trade_value
+            float(
+                execution_price
+            )
+            * int(
+                shares
+            )
             * self.commission_rate
         )
 
 
     # ========================================================
-    # Exit安全評価
+    # BUYスリッページ
+    # ========================================================
+
+    @staticmethod
+    def calculate_buy_slippage_cost(
+        market_price,
+        execution_price,
+        shares,
+    ):
+
+        return max(
+            0.0,
+            (
+                float(
+                    execution_price
+                )
+                - float(
+                    market_price
+                )
+            )
+            * int(
+                shares
+            ),
+        )
+
+
+    # ========================================================
+    # SELLスリッページ
+    # ========================================================
+
+    @staticmethod
+    def calculate_sell_slippage_cost(
+        market_price,
+        execution_price,
+        shares,
+    ):
+
+        return max(
+            0.0,
+            (
+                float(
+                    market_price
+                )
+                - float(
+                    execution_price
+                )
+            )
+            * int(
+                shares
+            ),
+        )
+
+
+    # ========================================================
+    # Exit安全判定
     # ========================================================
 
     def evaluate_exit_safely(
@@ -577,23 +612,27 @@ class TradingBacktestEngine:
             )
         )
 
+
         if current_price is None:
 
             return {
-                "action": "HOLD",
-                "reason": "NO_CLOSE",
+                "action":
+                    "HOLD",
+
+                "reason":
+                    "NO_CLOSE",
             }
 
 
         # ====================================================
-        # AI確率あり
+        # 通常のExitStrategy
         # ====================================================
 
         if probability is not None:
 
             try:
 
-                return (
+                result = (
                     self.exit_strategy
                     .evaluate(
                         row=row,
@@ -606,11 +645,18 @@ class TradingBacktestEngine:
                     )
                 )
 
+                if isinstance(
+                    result,
+                    dict,
+                ):
+
+                    return result
+
             except TypeError:
 
                 try:
 
-                    return (
+                    result = (
                         self.exit_strategy
                         .evaluate(
                             row,
@@ -620,6 +666,13 @@ class TradingBacktestEngine:
                         )
                     )
 
+                    if isinstance(
+                        result,
+                        dict,
+                    ):
+
+                        return result
+
                 except Exception:
                     pass
 
@@ -628,8 +681,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # AI確率がない日でも
-        # ハードExitだけは判定
+        # AI確率がない場合のハードExit
         # ====================================================
 
         return_rate = (
@@ -639,24 +691,30 @@ class TradingBacktestEngine:
         )
 
 
-        stop_loss_rate = getattr(
-            self.exit_strategy,
-            "stop_loss_rate",
-            0.05,
+        stop_loss_rate = float(
+            getattr(
+                self.exit_strategy,
+                "stop_loss_rate",
+                0.05,
+            )
         )
 
 
-        take_profit_rate = getattr(
-            self.exit_strategy,
-            "take_profit_rate",
-            0.10,
+        take_profit_rate = float(
+            getattr(
+                self.exit_strategy,
+                "take_profit_rate",
+                0.10,
+            )
         )
 
 
-        max_holding_days = getattr(
-            self.exit_strategy,
-            "max_holding_days",
-            10,
+        max_holding_days = int(
+            getattr(
+                self.exit_strategy,
+                "max_holding_days",
+                10,
+            )
         )
 
 
@@ -712,7 +770,363 @@ class TradingBacktestEngine:
 
 
     # ========================================================
-    # メイン
+    # 取引レコード作成
+    # ========================================================
+
+    def create_trade_record(
+        self,
+        position,
+        exit_signal_date,
+        exit_date,
+        exit_market_price,
+        exit_price,
+        exit_probability,
+        exit_reason,
+        forced_exit,
+        cash_after_exit,
+    ):
+
+        shares = int(
+            position[
+                "shares"
+            ]
+        )
+
+
+        # ====================================================
+        # SELL代金
+        # ====================================================
+
+        exit_value = (
+            float(
+                exit_price
+            )
+            * shares
+        )
+
+
+        # ====================================================
+        # SELL手数料
+        # ====================================================
+
+        sell_commission = (
+            self.calculate_commission(
+                exit_price,
+                shares,
+            )
+        )
+
+
+        # ====================================================
+        # SELLスリッページ
+        # ====================================================
+
+        sell_slippage = (
+            self.calculate_sell_slippage_cost(
+                exit_market_price,
+                exit_price,
+                shares,
+            )
+        )
+
+
+        # ====================================================
+        # BUY側
+        # ====================================================
+
+        entry_value = float(
+            position[
+                "entry_value"
+            ]
+        )
+
+
+        buy_commission = float(
+            position[
+                "buy_commission"
+            ]
+        )
+
+
+        buy_slippage = float(
+            position[
+                "buy_slippage"
+            ]
+        )
+
+
+        # ====================================================
+        # 実際にBUYで支払った総額
+        # ====================================================
+
+        total_entry_cost = (
+            entry_value
+            + buy_commission
+        )
+
+
+        # ====================================================
+        # 実際にSELLで受け取る総額
+        # ====================================================
+
+        net_exit_proceeds = (
+            exit_value
+            - sell_commission
+        )
+
+
+        # ====================================================
+        # 純損益
+        #
+        # SELL手取額
+        # -
+        # BUY総支払額
+        # ====================================================
+
+        net_profit = (
+            net_exit_proceeds
+            - total_entry_cost
+        )
+
+
+        if total_entry_cost > 0:
+
+            net_return = (
+                net_profit
+                / total_entry_cost
+            )
+
+        else:
+
+            net_return = 0.0
+
+
+        # ====================================================
+        # 手数料
+        # ====================================================
+
+        total_commission = (
+            buy_commission
+            + sell_commission
+        )
+
+
+        # ====================================================
+        # スリッページ
+        # ====================================================
+
+        total_slippage = (
+            buy_slippage
+            + sell_slippage
+        )
+
+
+        # ====================================================
+        # コストなし市場損益
+        #
+        # Entryの市場価格
+        # →
+        # Exitの市場価格
+        # ====================================================
+
+        gross_market_profit = (
+            (
+                float(
+                    exit_market_price
+                )
+                - float(
+                    position[
+                        "entry_market_price"
+                    ]
+                )
+            )
+            * shares
+        )
+
+
+        # ====================================================
+        # コスト総額
+        #
+        # 手数料 + スリッページ
+        # ====================================================
+
+        total_trading_cost = (
+            total_commission
+            + total_slippage
+        )
+
+
+        # ====================================================
+        # 監査用理論純損益
+        #
+        # 市場価格ベース利益
+        # -
+        # スリッページ
+        # -
+        # 手数料
+        #
+        # 小数誤差を除きNet_Profitと一致するはず
+        # ====================================================
+
+        audit_net_profit = (
+            gross_market_profit
+            - total_slippage
+            - total_commission
+        )
+
+
+        trade_audit_difference = (
+            net_profit
+            - audit_net_profit
+        )
+
+
+        return {
+
+            "Entry_Signal_Date":
+                position[
+                    "signal_date"
+                ],
+
+            "Entry_Date":
+                position[
+                    "entry_date"
+                ],
+
+            "Exit_Signal_Date":
+                exit_signal_date,
+
+            "Exit_Date":
+                exit_date,
+
+            "Shares":
+                shares,
+
+            # ================================================
+            # BUY
+            # ================================================
+
+            "Entry_Market_Price":
+                position[
+                    "entry_market_price"
+                ],
+
+            "Entry_Price":
+                position[
+                    "entry_price"
+                ],
+
+            "Entry_Value":
+                entry_value,
+
+            "Buy_Commission":
+                buy_commission,
+
+            "Buy_Slippage":
+                buy_slippage,
+
+            # ================================================
+            # SELL
+            # ================================================
+
+            "Exit_Market_Price":
+                float(
+                    exit_market_price
+                ),
+
+            "Exit_Price":
+                float(
+                    exit_price
+                ),
+
+            "Exit_Value":
+                exit_value,
+
+            "Sell_Commission":
+                sell_commission,
+
+            "Sell_Slippage":
+                sell_slippage,
+
+            # ================================================
+            # 合計
+            # ================================================
+
+            "Total_Commission":
+                total_commission,
+
+            "Total_Slippage":
+                total_slippage,
+
+            "Total_Trading_Cost":
+                total_trading_cost,
+
+            # ================================================
+            # 損益
+            # ================================================
+
+            "Gross_Market_Profit":
+                gross_market_profit,
+
+            "Net_Profit":
+                net_profit,
+
+            "Net_Return":
+                net_return,
+
+            # ================================================
+            # 監査
+            # ================================================
+
+            "Audit_Net_Profit":
+                audit_net_profit,
+
+            "Trade_Audit_Difference":
+                trade_audit_difference,
+
+            "Trade_Audit_OK":
+                (
+                    abs(
+                        trade_audit_difference
+                    )
+                    < 0.01
+                ),
+
+            # ================================================
+            # その他
+            # ================================================
+
+            "Holding_Days":
+                position[
+                    "holding_days"
+                ],
+
+            "Entry_Probability":
+                position[
+                    "entry_probability"
+                ],
+
+            "Exit_Probability":
+                exit_probability,
+
+            "Entry_Score":
+                position[
+                    "entry_score"
+                ],
+
+            "Exit_Reason":
+                exit_reason,
+
+            "Forced_Exit":
+                forced_exit,
+
+            "Cash_After_Exit":
+                cash_after_exit,
+        }
+
+
+    # ========================================================
+    # メインバックテスト
     # ========================================================
 
     def run(
@@ -734,7 +1148,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 初期化
+        # 初期状態
         # ====================================================
 
         cash = float(
@@ -754,10 +1168,6 @@ class TradingBacktestEngine:
         order_records = []
 
 
-        # ====================================================
-        # Walk Forward開始日
-        # ====================================================
-
         prediction_start = (
             predictions.index.min()
         )
@@ -772,12 +1182,13 @@ class TradingBacktestEngine:
         if len(trading_dates) == 0:
 
             raise ValueError(
-                "バックテスト可能な日付がありません。"
+                "バックテスト可能な"
+                "日付がありません。"
             )
 
 
         # ====================================================
-        # 日次ループ
+        # 日次処理
         # ====================================================
 
         for current_date in trading_dates:
@@ -824,12 +1235,12 @@ class TradingBacktestEngine:
 
 
             # =================================================
-            # A. 始値でPending注文を約定
+            # A. 始値でPending注文を実行
             # =================================================
 
             if pending_order is not None:
 
-                intended_date = (
+                execution_date = (
                     pending_order.get(
                         "execution_date"
                     )
@@ -837,9 +1248,9 @@ class TradingBacktestEngine:
 
 
                 if (
-                    intended_date is None
+                    execution_date is None
                     or current_date
-                    >= intended_date
+                    >= execution_date
                 ):
 
                     order_type = (
@@ -865,40 +1276,23 @@ class TradingBacktestEngine:
                         )
 
 
-                        signal_probability = (
+                        probability = (
                             pending_order.get(
                                 "probability"
                             )
                         )
 
 
-                        signal_score = (
+                        score = (
                             pending_order.get(
                                 "score"
                             )
                         )
 
 
-                        # -------------------------------------
-                        # 実際のBUY約定価格
-                        # -------------------------------------
-
-                        buy_price = (
-                            self.calculate_buy_price(
-                                market_open
-                            )
-                        )
-
-
-                        # -------------------------------------
-                        # RiskManagerは株数決定に使用
-                        #
-                        # market_priceには始値を渡す。
-                        # RiskManager内部にもslippage設定があるため、
-                        # RiskManagerが計算する株数は安全側。
-                        #
-                        # 実際の会計計算は下でTradingEngine自身が行う。
-                        # -------------------------------------
+                        # =====================================
+                        # RiskManagerで株数を決定
+                        # =====================================
 
                         risk_result = (
                             self.risk_manager
@@ -928,9 +1322,9 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
-                        # 念のため100株単位へ丸める
-                        # -------------------------------------
+                        # =====================================
+                        # 売買単位へ丸める
+                        # =====================================
 
                         shares = (
                             shares
@@ -939,19 +1333,30 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
-                        # 実際の買い代金
-                        # -------------------------------------
+                        # =====================================
+                        # BUY約定価格
+                        # =====================================
 
-                        buy_value = (
+                        buy_price = (
+                            self.calculate_buy_price(
+                                market_open
+                            )
+                        )
+
+
+                        # =====================================
+                        # BUY約定金額
+                        # =====================================
+
+                        entry_value = (
                             buy_price
                             * shares
                         )
 
 
-                        # -------------------------------------
-                        # 買い手数料
-                        # -------------------------------------
+                        # =====================================
+                        # BUY手数料
+                        # =====================================
 
                         buy_commission = (
                             self.calculate_commission(
@@ -961,94 +1366,91 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
-                        # 必要現金
-                        # -------------------------------------
+                        # =====================================
+                        # BUYスリッページ
+                        # =====================================
+
+                        buy_slippage = (
+                            self
+                            .calculate_buy_slippage_cost(
+                                market_open,
+                                buy_price,
+                                shares,
+                            )
+                        )
+
+
+                        # =====================================
+                        # 実際に必要な現金
+                        # =====================================
 
                         required_cash = (
-                            buy_value
+                            entry_value
                             + buy_commission
                         )
 
 
-                        # -------------------------------------
-                        # 最終的な現金チェック
-                        # -------------------------------------
+                        # =====================================
+                        # 最終資金チェック
+                        # =====================================
 
                         if (
                             shares <= 0
                             or required_cash
-                            > cash
+                            > cash + 1e-9
                         ):
 
                             can_trade = False
 
 
+                        # =====================================
+                        # BUY成立
+                        # =====================================
+
                         if can_trade:
 
-                            cash_before = cash
-
-
-                            # ---------------------------------
-                            # 現金から
-                            # 購入代金＋買い手数料を引く
-                            # ---------------------------------
+                            cash_before_buy = cash
 
                             cash -= required_cash
 
 
-                            # ---------------------------------
-                            # BUYスリッページ額
-                            #
-                            # 実際の始値との差額
-                            # ---------------------------------
-
-                            buy_slippage_cost = (
-                                (
-                                    buy_price
-                                    - market_open
-                                )
-                                * shares
-                            )
-
-
                             position = {
-
-                                "entry_date":
-                                    current_date,
 
                                 "signal_date":
                                     signal_date,
 
+                                "entry_date":
+                                    current_date,
+
                                 "shares":
                                     shares,
 
-                                "entry_market_open":
+                                "entry_market_price":
                                     market_open,
 
                                 "entry_price":
                                     buy_price,
 
                                 "entry_value":
-                                    buy_value,
+                                    entry_value,
 
                                 "buy_commission":
                                     buy_commission,
 
-                                "buy_slippage_cost":
-                                    buy_slippage_cost,
+                                "buy_slippage":
+                                    buy_slippage,
 
                                 "entry_probability":
-                                    signal_probability,
+                                    probability,
 
                                 "entry_score":
-                                    signal_score,
+                                    score,
 
                                 "holding_days":
                                     0,
 
                                 "cash_before_buy":
-                                    cash_before,
+                                    cash_before_buy,
 
                                 "cash_after_buy":
                                     cash,
@@ -1066,7 +1468,7 @@ class TradingBacktestEngine:
                                 "Event":
                                     "BUY_FILLED",
 
-                                "Market_Open":
+                                "Market_Price":
                                     market_open,
 
                                 "Execution_Price":
@@ -1076,18 +1478,25 @@ class TradingBacktestEngine:
                                     shares,
 
                                 "Trade_Value":
-                                    buy_value,
+                                    entry_value,
 
                                 "Commission":
                                     buy_commission,
 
-                                "Slippage_Cost":
-                                    buy_slippage_cost,
+                                "Slippage":
+                                    buy_slippage,
+
+                                "Required_Cash":
+                                    required_cash,
 
                                 "Cash_After":
                                     cash,
                             })
 
+
+                        # =====================================
+                        # BUY見送り
+                        # =====================================
 
                         else:
 
@@ -1107,7 +1516,7 @@ class TradingBacktestEngine:
                                 "Signal_Date":
                                     signal_date,
 
-                                "Market_Open":
+                                "Market_Price":
                                     market_open,
 
                                 "Calculated_Buy_Price":
@@ -1123,10 +1532,10 @@ class TradingBacktestEngine:
                                     cash,
 
                                 "Probability_Up":
-                                    signal_probability,
+                                    probability,
 
                                 "Score":
-                                    signal_score,
+                                    score,
 
                                 "Reason":
                                     reason,
@@ -1144,7 +1553,7 @@ class TradingBacktestEngine:
                                 "Event":
                                     "BUY_SKIPPED",
 
-                                "Market_Open":
+                                "Market_Price":
                                     market_open,
 
                                 "Execution_Price":
@@ -1198,9 +1607,16 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
+                        shares = int(
+                            position[
+                                "shares"
+                            ]
+                        )
+
+
+                        # =====================================
                         # SELL約定価格
-                        # -------------------------------------
+                        # =====================================
 
                         sell_price = (
                             self.calculate_sell_price(
@@ -1209,16 +1625,9 @@ class TradingBacktestEngine:
                         )
 
 
-                        shares = int(
-                            position[
-                                "shares"
-                            ]
-                        )
-
-
-                        # -------------------------------------
-                        # 売却代金
-                        # -------------------------------------
+                        # =====================================
+                        # SELL代金
+                        # =====================================
 
                         sell_value = (
                             sell_price
@@ -1226,9 +1635,9 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
-                        # 売り手数料
-                        # -------------------------------------
+                        # =====================================
+                        # SELL手数料
+                        # =====================================
 
                         sell_commission = (
                             self.calculate_commission(
@@ -1238,22 +1647,9 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
-                        # SELLスリッページ
-                        # -------------------------------------
-
-                        sell_slippage_cost = (
-                            (
-                                market_open
-                                - sell_price
-                            )
-                            * shares
-                        )
-
-
-                        # -------------------------------------
-                        # 売却後受取金
-                        # -------------------------------------
+                        # =====================================
+                        # 売却手取額
+                        # =====================================
 
                         net_sell_proceeds = (
                             sell_value
@@ -1261,205 +1657,54 @@ class TradingBacktestEngine:
                         )
 
 
-                        # -------------------------------------
+                        # =====================================
                         # 現金へ戻す
-                        # -------------------------------------
+                        # =====================================
 
                         cash += (
                             net_sell_proceeds
                         )
 
 
-                        # -------------------------------------
-                        # 投入総コスト
-                        #
-                        # BUY代金＋BUY手数料
-                        # -------------------------------------
+                        # =====================================
+                        # 取引レコード
+                        # =====================================
 
-                        total_entry_cost = (
-                            position[
-                                "entry_value"
-                            ]
-                            + position[
-                                "buy_commission"
-                            ]
-                        )
+                        trade_record = (
+                            self.create_trade_record(
+                                position=
+                                    position,
 
+                                exit_signal_date=
+                                    signal_date,
 
-                        # -------------------------------------
-                        # 純損益
-                        #
-                        # 売却手取額
-                        # -
-                        # 購入総コスト
-                        # -------------------------------------
+                                exit_date=
+                                    current_date,
 
-                        net_profit = (
-                            net_sell_proceeds
-                            - total_entry_cost
-                        )
+                                exit_market_price=
+                                    market_open,
 
+                                exit_price=
+                                    sell_price,
 
-                        # -------------------------------------
-                        # 純損益率
-                        # -------------------------------------
+                                exit_probability=
+                                    exit_probability,
 
-                        if total_entry_cost > 0:
+                                exit_reason=
+                                    exit_reason,
 
-                            net_return = (
-                                net_profit
-                                / total_entry_cost
+                                forced_exit=
+                                    False,
+
+                                cash_after_exit=
+                                    cash,
                             )
-
-                        else:
-
-                            net_return = 0.0
-
-
-                        # -------------------------------------
-                        # 売買手数料合計
-                        # -------------------------------------
-
-                        total_commission = (
-                            position[
-                                "buy_commission"
-                            ]
-                            + sell_commission
                         )
 
 
-                        # -------------------------------------
-                        # スリッページ合計
-                        # -------------------------------------
-
-                        total_slippage = (
-                            position[
-                                "buy_slippage_cost"
-                            ]
-                            + sell_slippage_cost
+                        trades.append(
+                            trade_record
                         )
-
-
-                        # -------------------------------------
-                        # 市場価格だけで見た損益
-                        #
-                        # スリッページ・手数料なし
-                        # -------------------------------------
-
-                        gross_market_profit = (
-                            (
-                                market_open
-                                - position[
-                                    "entry_market_open"
-                                ]
-                            )
-                            * shares
-                        )
-
-
-                        trades.append({
-
-                            "Entry_Signal_Date":
-                                position[
-                                    "signal_date"
-                                ],
-
-                            "Entry_Date":
-                                position[
-                                    "entry_date"
-                                ],
-
-                            "Exit_Signal_Date":
-                                signal_date,
-
-                            "Exit_Date":
-                                current_date,
-
-                            "Shares":
-                                shares,
-
-                            "Entry_Market_Open":
-                                position[
-                                    "entry_market_open"
-                                ],
-
-                            "Entry_Price":
-                                position[
-                                    "entry_price"
-                                ],
-
-                            "Exit_Market_Open":
-                                market_open,
-
-                            "Exit_Price":
-                                sell_price,
-
-                            "Entry_Value":
-                                position[
-                                    "entry_value"
-                                ],
-
-                            "Exit_Value":
-                                sell_value,
-
-                            "Buy_Commission":
-                                position[
-                                    "buy_commission"
-                                ],
-
-                            "Sell_Commission":
-                                sell_commission,
-
-                            "Total_Commission":
-                                total_commission,
-
-                            "Buy_Slippage":
-                                position[
-                                    "buy_slippage_cost"
-                                ],
-
-                            "Sell_Slippage":
-                                sell_slippage_cost,
-
-                            "Total_Slippage":
-                                total_slippage,
-
-                            "Gross_Market_Profit":
-                                gross_market_profit,
-
-                            "Net_Profit":
-                                net_profit,
-
-                            "Net_Return":
-                                net_return,
-
-                            "Holding_Days":
-                                position[
-                                    "holding_days"
-                                ],
-
-                            "Entry_Probability":
-                                position[
-                                    "entry_probability"
-                                ],
-
-                            "Exit_Probability":
-                                exit_probability,
-
-                            "Entry_Score":
-                                position[
-                                    "entry_score"
-                                ],
-
-                            "Exit_Reason":
-                                exit_reason,
-
-                            "Forced_Exit":
-                                False,
-
-                            "Cash_After_Exit":
-                                cash,
-                        })
 
 
                         order_records.append({
@@ -1473,7 +1718,7 @@ class TradingBacktestEngine:
                             "Event":
                                 "SELL_FILLED",
 
-                            "Market_Open":
+                            "Market_Price":
                                 market_open,
 
                             "Execution_Price":
@@ -1486,13 +1731,19 @@ class TradingBacktestEngine:
                                 sell_value,
 
                             "Commission":
-                                sell_commission,
+                                trade_record[
+                                    "Sell_Commission"
+                                ],
 
-                            "Slippage_Cost":
-                                sell_slippage_cost,
+                            "Slippage":
+                                trade_record[
+                                    "Sell_Slippage"
+                                ],
 
                             "Net_Profit":
-                                net_profit,
+                                trade_record[
+                                    "Net_Profit"
+                                ],
 
                             "Cash_After":
                                 cash,
@@ -1508,7 +1759,7 @@ class TradingBacktestEngine:
 
 
             # =================================================
-            # B. 当日終値時点の情報
+            # B. 当日終値時点のAI情報
             # =================================================
 
             probability = (
@@ -1535,10 +1786,6 @@ class TradingBacktestEngine:
                 position is not None
                 and pending_order is None
             ):
-
-                # ---------------------------------------------
-                # Entry日より後の日だけ保有日数加算
-                # ---------------------------------------------
 
                 if (
                     current_date
@@ -1744,7 +1991,14 @@ class TradingBacktestEngine:
 
             if position is not None:
 
-                market_position_value = (
+                # ---------------------------------------------
+                # 未決済ポジションは終値で時価評価
+                #
+                # BUY手数料は既にcashから引かれているので
+                # 二重控除しない。
+                # ---------------------------------------------
+
+                position_value = (
                     market_close
                     * position[
                         "shares"
@@ -1753,12 +2007,12 @@ class TradingBacktestEngine:
 
             else:
 
-                market_position_value = 0.0
+                position_value = 0.0
 
 
             total_equity = (
                 cash
-                + market_position_value
+                + position_value
             )
 
 
@@ -1771,7 +2025,7 @@ class TradingBacktestEngine:
                     cash,
 
                 "Position_Value":
-                    market_position_value,
+                    position_value,
 
                 "Total_Equity":
                     total_equity,
@@ -1781,8 +2035,7 @@ class TradingBacktestEngine:
                         position[
                             "shares"
                         ]
-                        if position
-                        is not None
+                        if position is not None
                         else 0
                     ),
 
@@ -1792,10 +2045,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 最終日にポジションが残っている場合
-        #
-        # 最終日は次営業日がないのでCloseで強制決済。
-        # SELL側スリッページを適用。
+        # 最終日強制決済
         # ====================================================
 
         if position is not None:
@@ -1835,15 +2085,14 @@ class TradingBacktestEngine:
                 )
 
 
-                # ---------------------------------------------
-                # 最終Closeから売りスリッページ
-                # ---------------------------------------------
+                # =============================================
+                # 最終Closeを市場価格として
+                # SELLスリッページ適用
+                # =============================================
 
                 sell_price = (
-                    final_close
-                    * (
-                        1.0
-                        - self.slippage_rate
+                    self.calculate_sell_price(
+                        final_close
                     )
                 )
 
@@ -1862,15 +2111,6 @@ class TradingBacktestEngine:
                 )
 
 
-                sell_slippage_cost = (
-                    (
-                        final_close
-                        - sell_price
-                    )
-                    * shares
-                )
-
-
                 net_sell_proceeds = (
                     sell_value
                     - sell_commission
@@ -1882,164 +2122,41 @@ class TradingBacktestEngine:
                 )
 
 
-                total_entry_cost = (
-                    position[
-                        "entry_value"
-                    ]
-                    + position[
-                        "buy_commission"
-                    ]
-                )
+                trade_record = (
+                    self.create_trade_record(
+                        position=
+                            position,
 
+                        exit_signal_date=
+                            final_date,
 
-                net_profit = (
-                    net_sell_proceeds
-                    - total_entry_cost
-                )
+                        exit_date=
+                            final_date,
 
+                        exit_market_price=
+                            final_close,
 
-                if total_entry_cost > 0:
+                        exit_price=
+                            sell_price,
 
-                    net_return = (
-                        net_profit
-                        / total_entry_cost
+                        exit_probability=
+                            None,
+
+                        exit_reason=
+                            "FINAL_DATA_EXIT",
+
+                        forced_exit=
+                            True,
+
+                        cash_after_exit=
+                            cash,
                     )
-
-                else:
-
-                    net_return = 0.0
-
-
-                total_commission = (
-                    position[
-                        "buy_commission"
-                    ]
-                    + sell_commission
                 )
 
 
-                total_slippage = (
-                    position[
-                        "buy_slippage_cost"
-                    ]
-                    + sell_slippage_cost
+                trades.append(
+                    trade_record
                 )
-
-
-                gross_market_profit = (
-                    (
-                        final_close
-                        - position[
-                            "entry_market_open"
-                        ]
-                    )
-                    * shares
-                )
-
-
-                trades.append({
-
-                    "Entry_Signal_Date":
-                        position[
-                            "signal_date"
-                        ],
-
-                    "Entry_Date":
-                        position[
-                            "entry_date"
-                        ],
-
-                    "Exit_Signal_Date":
-                        final_date,
-
-                    "Exit_Date":
-                        final_date,
-
-                    "Shares":
-                        shares,
-
-                    "Entry_Market_Open":
-                        position[
-                            "entry_market_open"
-                        ],
-
-                    "Entry_Price":
-                        position[
-                            "entry_price"
-                        ],
-
-                    "Exit_Market_Open":
-                        final_close,
-
-                    "Exit_Price":
-                        sell_price,
-
-                    "Entry_Value":
-                        position[
-                            "entry_value"
-                        ],
-
-                    "Exit_Value":
-                        sell_value,
-
-                    "Buy_Commission":
-                        position[
-                            "buy_commission"
-                        ],
-
-                    "Sell_Commission":
-                        sell_commission,
-
-                    "Total_Commission":
-                        total_commission,
-
-                    "Buy_Slippage":
-                        position[
-                            "buy_slippage_cost"
-                        ],
-
-                    "Sell_Slippage":
-                        sell_slippage_cost,
-
-                    "Total_Slippage":
-                        total_slippage,
-
-                    "Gross_Market_Profit":
-                        gross_market_profit,
-
-                    "Net_Profit":
-                        net_profit,
-
-                    "Net_Return":
-                        net_return,
-
-                    "Holding_Days":
-                        position[
-                            "holding_days"
-                        ],
-
-                    "Entry_Probability":
-                        position[
-                            "entry_probability"
-                        ],
-
-                    "Exit_Probability":
-                        None,
-
-                    "Entry_Score":
-                        position[
-                            "entry_score"
-                        ],
-
-                    "Exit_Reason":
-                        "FINAL_DATA_EXIT",
-
-                    "Forced_Exit":
-                        True,
-
-                    "Cash_After_Exit":
-                        cash,
-                })
 
 
                 order_records.append({
@@ -2053,7 +2170,7 @@ class TradingBacktestEngine:
                     "Event":
                         "FINAL_SELL",
 
-                    "Market_Open":
+                    "Market_Price":
                         final_close,
 
                     "Execution_Price":
@@ -2066,13 +2183,19 @@ class TradingBacktestEngine:
                         sell_value,
 
                     "Commission":
-                        sell_commission,
+                        trade_record[
+                            "Sell_Commission"
+                        ],
 
-                    "Slippage_Cost":
-                        sell_slippage_cost,
+                    "Slippage":
+                        trade_record[
+                            "Sell_Slippage"
+                        ],
 
                     "Net_Profit":
-                        net_profit,
+                        trade_record[
+                            "Net_Profit"
+                        ],
 
                     "Cash_After":
                         cash,
@@ -2085,9 +2208,9 @@ class TradingBacktestEngine:
                 position = None
 
 
-                # ---------------------------------------------
-                # 最終日のEquityを現金値へ修正
-                # ---------------------------------------------
+                # =============================================
+                # 最終Equityを修正
+                # =============================================
 
                 if equity_records:
 
@@ -2109,7 +2232,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # DataFrame化
+        # DataFrame
         # ====================================================
 
         self.trades = pd.DataFrame(
@@ -2117,10 +2240,8 @@ class TradingBacktestEngine:
         )
 
 
-        self.equity_curve = (
-            pd.DataFrame(
-                equity_records
-            )
+        self.equity_curve = pd.DataFrame(
+            equity_records
         )
 
 
@@ -2133,6 +2254,7 @@ class TradingBacktestEngine:
                     "Date"
                 ]
             )
+
 
             self.equity_curve = (
                 self.equity_curve
@@ -2166,7 +2288,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 指標
+        # 会計指標
         # ====================================================
 
         self.metrics = (
@@ -2192,6 +2314,13 @@ class TradingBacktestEngine:
     ):
 
         if self.equity_curve.empty:
+            return 0.0
+
+
+        if (
+            "Total_Equity"
+            not in self.equity_curve.columns
+        ):
 
             return 0.0
 
@@ -2205,13 +2334,30 @@ class TradingBacktestEngine:
 
 
         if equity.empty:
-
             return 0.0
 
 
         running_max = (
             equity.cummax()
         )
+
+
+        valid = (
+            running_max > 0
+        )
+
+
+        equity = equity[
+            valid
+        ]
+
+        running_max = running_max[
+            valid
+        ]
+
+
+        if equity.empty:
+            return 0.0
 
 
         drawdown = (
@@ -2229,7 +2375,7 @@ class TradingBacktestEngine:
 
 
     # ========================================================
-    # 指標計算
+    # 会計・成績計算
     # ========================================================
 
     def calculate_metrics(
@@ -2242,14 +2388,19 @@ class TradingBacktestEngine:
         )
 
 
-        total_profit = (
+        # ====================================================
+        # 経路A
+        # 最終資産 - 初期資金
+        # ====================================================
+
+        asset_profit = (
             final_capital
             - self.initial_capital
         )
 
 
         total_return = (
-            total_profit
+            asset_profit
             / self.initial_capital
             if self.initial_capital > 0
             else 0.0
@@ -2262,6 +2413,19 @@ class TradingBacktestEngine:
 
         if self.trades.empty:
 
+            accounting_difference = (
+                asset_profit
+            )
+
+
+            accounting_ok = (
+                abs(
+                    accounting_difference
+                )
+                < 0.01
+            )
+
+
             return {
 
                 "initial_capital":
@@ -2271,7 +2435,7 @@ class TradingBacktestEngine:
                     final_capital,
 
                 "total_profit":
-                    total_profit,
+                    asset_profit,
 
                 "total_return":
                     total_return,
@@ -2321,11 +2485,58 @@ class TradingBacktestEngine:
                 "worst_trade":
                     None,
 
+                # ============================================
+                # コスト
+                # ============================================
+
+                "buy_commission":
+                    0.0,
+
+                "sell_commission":
+                    0.0,
+
                 "total_commission":
+                    0.0,
+
+                "buy_slippage":
+                    0.0,
+
+                "sell_slippage":
                     0.0,
 
                 "total_slippage":
                     0.0,
+
+                "total_trading_cost":
+                    0.0,
+
+                # ============================================
+                # 会計
+                # ============================================
+
+                "trade_profit_sum":
+                    0.0,
+
+                "win_loss_profit":
+                    0.0,
+
+                "asset_profit":
+                    asset_profit,
+
+                "accounting_difference":
+                    accounting_difference,
+
+                "win_loss_difference":
+                    0.0,
+
+                "trade_audit_max_difference":
+                    0.0,
+
+                "all_trade_audit_ok":
+                    True,
+
+                "accounting_ok":
+                    accounting_ok,
 
                 "skipped_entries":
                     len(
@@ -2340,7 +2551,7 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 損益
+        # Net Profit
         # ====================================================
 
         profits = pd.to_numeric(
@@ -2357,6 +2568,13 @@ class TradingBacktestEngine:
             ],
             errors="coerce",
         ).fillna(0.0)
+
+
+        trade_count = int(
+            len(
+                profits
+            )
+        )
 
 
         wins = int(
@@ -2380,11 +2598,6 @@ class TradingBacktestEngine:
         )
 
 
-        trade_count = len(
-            profits
-        )
-
-
         win_rate = (
             wins
             / trade_count
@@ -2392,6 +2605,21 @@ class TradingBacktestEngine:
             else None
         )
 
+
+        # ====================================================
+        # 経路B
+        # 全Net_Profit合計
+        # ====================================================
+
+        trade_profit_sum = float(
+            profits.sum()
+        )
+
+
+        # ====================================================
+        # 経路C
+        # 勝ち合計 - 負け合計
+        # ====================================================
 
         gross_profit = float(
             profits[
@@ -2409,8 +2637,14 @@ class TradingBacktestEngine:
         )
 
 
+        win_loss_profit = (
+            gross_profit
+            - gross_loss
+        )
+
+
         # ====================================================
-        # PF
+        # Profit Factor
         # ====================================================
 
         if gross_loss > 0:
@@ -2432,30 +2666,72 @@ class TradingBacktestEngine:
 
 
         # ====================================================
-        # 手数料
+        # 手数料集計
         # ====================================================
 
-        total_commission = float(
+        buy_commission = float(
             pd.to_numeric(
                 self.trades[
-                    "Total_Commission"
+                    "Buy_Commission"
                 ],
                 errors="coerce",
             ).fillna(0.0).sum()
         )
 
 
-        # ====================================================
-        # スリッページ
-        # ====================================================
-
-        total_slippage = float(
+        sell_commission = float(
             pd.to_numeric(
                 self.trades[
-                    "Total_Slippage"
+                    "Sell_Commission"
                 ],
                 errors="coerce",
             ).fillna(0.0).sum()
+        )
+
+
+        total_commission = (
+            buy_commission
+            + sell_commission
+        )
+
+
+        # ====================================================
+        # スリッページ集計
+        # ====================================================
+
+        buy_slippage = float(
+            pd.to_numeric(
+                self.trades[
+                    "Buy_Slippage"
+                ],
+                errors="coerce",
+            ).fillna(0.0).sum()
+        )
+
+
+        sell_slippage = float(
+            pd.to_numeric(
+                self.trades[
+                    "Sell_Slippage"
+                ],
+                errors="coerce",
+            ).fillna(0.0).sum()
+        )
+
+
+        total_slippage = (
+            buy_slippage
+            + sell_slippage
+        )
+
+
+        # ====================================================
+        # 総取引コスト
+        # ====================================================
+
+        total_trading_cost = (
+            total_commission
+            + total_slippage
         )
 
 
@@ -2471,34 +2747,123 @@ class TradingBacktestEngine:
         )
 
 
-        average_holding_days = (
-            float(
+        if holding_days.notna().any():
+
+            average_holding_days = float(
                 holding_days.mean()
             )
-            if holding_days.notna().any()
-            else None
-        )
+
+        else:
+
+            average_holding_days = None
 
 
         # ====================================================
-        # 重要整合性チェック
+        # 会計監査1
         #
-        # 各トレード純損益の合計と
-        # 最終資産差額は一致するはず。
+        # 資産増減
+        # -
+        # 全取引純損益
         # ====================================================
-
-        trade_profit_sum = float(
-            profits.sum()
-        )
-
 
         accounting_difference = (
-            total_profit
+            asset_profit
             - trade_profit_sum
         )
 
 
+        # ====================================================
+        # 会計監査2
+        #
+        # NetProfit合計
+        # -
+        # 勝ち利益＋負け利益
+        # ====================================================
+
+        win_loss_difference = (
+            trade_profit_sum
+            - win_loss_profit
+        )
+
+
+        # ====================================================
+        # 会計監査3
+        #
+        # 各取引
+        # NetProfit
+        # vs
+        # 市場損益 - コスト
+        # ====================================================
+
+        if (
+            "Trade_Audit_Difference"
+            in self.trades.columns
+        ):
+
+            trade_audit_diff = (
+                pd.to_numeric(
+                    self.trades[
+                        "Trade_Audit_Difference"
+                    ],
+                    errors="coerce",
+                )
+                .fillna(0.0)
+                .abs()
+            )
+
+
+            trade_audit_max_difference = float(
+                trade_audit_diff.max()
+            )
+
+
+            all_trade_audit_ok = bool(
+                (
+                    trade_audit_diff
+                    < 0.01
+                ).all()
+            )
+
+        else:
+
+            trade_audit_max_difference = (
+                float("inf")
+            )
+
+            all_trade_audit_ok = False
+
+
+        # ====================================================
+        # 最終会計判定
+        # ====================================================
+
+        accounting_ok = bool(
+
+            abs(
+                accounting_difference
+            ) < 0.01
+
+            and
+
+            abs(
+                win_loss_difference
+            ) < 0.01
+
+            and
+
+            all_trade_audit_ok
+        )
+
+
+        # ====================================================
+        # metrics
+        # ====================================================
+
         return {
+
+            # ================================================
+            # 資産
+            # ================================================
 
             "initial_capital":
                 self.initial_capital,
@@ -2507,10 +2872,14 @@ class TradingBacktestEngine:
                 final_capital,
 
             "total_profit":
-                total_profit,
+                asset_profit,
 
             "total_return":
                 total_return,
+
+            # ================================================
+            # 取引
+            # ================================================
 
             "trade_count":
                 trade_count,
@@ -2565,22 +2934,78 @@ class TradingBacktestEngine:
                     profits.min()
                 ),
 
+            # ================================================
+            # 手数料
+            # ================================================
+
+            "buy_commission":
+                buy_commission,
+
+            "sell_commission":
+                sell_commission,
+
             "total_commission":
                 total_commission,
+
+            # ================================================
+            # スリッページ
+            # ================================================
+
+            "buy_slippage":
+                buy_slippage,
+
+            "sell_slippage":
+                sell_slippage,
 
             "total_slippage":
                 total_slippage,
 
+            # ================================================
+            # 全取引コスト
+            # ================================================
+
+            "total_trading_cost":
+                total_trading_cost,
+
+            # ================================================
+            # 会計監査
+            # ================================================
+
+            # 全NetProfit合計
             "trade_profit_sum":
                 trade_profit_sum,
 
+            # 勝ち - 負け
+            "win_loss_profit":
+                win_loss_profit,
+
+            # 最終資産 - 初期資金
+            "asset_profit":
+                asset_profit,
+
+            # 資産増減 vs NetProfit
             "accounting_difference":
                 accounting_difference,
 
+            # NetProfit vs 勝敗集計
+            "win_loss_difference":
+                win_loss_difference,
+
+            # 各取引最大誤差
+            "trade_audit_max_difference":
+                trade_audit_max_difference,
+
+            # 全取引個別監査
+            "all_trade_audit_ok":
+                all_trade_audit_ok,
+
+            # 最終判定
             "accounting_ok":
-                abs(
-                    accounting_difference
-                ) < 0.01,
+                accounting_ok,
+
+            # ================================================
+            # その他
+            # ================================================
 
             "skipped_entries":
                 len(
@@ -2625,18 +3050,22 @@ class TradingBacktestEngine:
         self,
     ):
 
-        return self.skipped_entries.copy()
+        return (
+            self.skipped_entries.copy()
+        )
 
 
     def get_order_log(
         self,
     ):
 
-        return self.order_log.copy()
+        return (
+            self.order_log.copy()
+        )
 
 
 # ============================================================
-# 簡易実行関数
+# 簡易実行
 # ============================================================
 
 def run_trading_backtest(
