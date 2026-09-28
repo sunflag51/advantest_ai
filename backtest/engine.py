@@ -1,77 +1,122 @@
 # ============================================================
-# アドバンテスト AI売買システム
 # backtest/engine.py
 #
-# ウォークフォワード検証エンジン
+# WalkForwardBacktest v2.1
 #
-# 目的
-# ・未来データを使わずAIを検証する
-# ・過去データだけで学習
-# ・次の期間を予測
-# ・時間を進めて再学習
+# main.py v4 対応
+# ai/model.py v2 対応
 #
-# 現段階では
-# 「AI予測能力の検証」が目的
+# ------------------------------------------------------------
+# AIターゲット定義
 #
-# 実際の売買注文は行わない
+# シグナル日:
+#   t
+#
+# エントリー想定:
+#   Open(t + 1)
+#
+# 評価価格:
+#   Close(t + target_horizon)
+#
+# Future_Return:
+#   Close(t + target_horizon)
+#   / Open(t + 1)
+#   - 1
+#
+# Target:
+#   Future_Return > target_return_threshold
+#
+# target_horizon:
+#   1 / 3 / 5
+#
+# ------------------------------------------------------------
+# v2.1
+#
+# ・1日 / 3日 / 5日ターゲット対応
+# ・target_return_threshold対応
+# ・Walk-Forward
+# ・Expanding Window
+# ・Purge処理
+# ・未来情報混入対策
+# ・Probability_Up出力
 # ============================================================
 
 
 import numpy as np
 import pandas as pd
 
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
     recall_score,
     f1_score,
     roc_auc_score,
-    confusion_matrix
+    confusion_matrix,
 )
 
-from ai.model import StockPredictionModel
+from ai.features import get_ai_feature_columns
 
-from ai.features import (
-    get_ai_feature_columns
+
+# ============================================================
+# Version
+# ============================================================
+
+BACKTEST_ENGINE_VERSION = "v2.1"
+
+
+# ============================================================
+# Supported target horizons
+# ============================================================
+
+SUPPORTED_HORIZONS = (
+    1,
+    3,
+    5,
 )
 
 
 # ============================================================
-# ウォークフォワード検証エンジン
+# WalkForwardBacktest
 # ============================================================
 
 class WalkForwardBacktest:
 
-    """
-    ウォークフォワード方式で
-    AIの予測性能を検証するクラス
-    """
-
-    # ========================================================
-    # 初期化
-    # ========================================================
-
     def __init__(
         self,
+
         initial_train_size=500,
+
         test_size=20,
+
         retrain_every=20,
-        threshold=0.50
+
+        prediction_threshold=0.50,
+
+        target_horizon=3,
+
+        target_return_threshold=0.0,
+
+        n_estimators=500,
+
+        max_depth=8,
+
+        min_samples_split=10,
+
+        min_samples_leaf=5,
+
+        max_features="sqrt",
+
+        random_state=42,
+
+        class_weight="balanced",
+
+        n_jobs=-1,
     ):
 
-        """
-        initial_train_size
-            最初のAI学習に使用する営業日数
-
-        test_size
-            1回の学習後に検証する最大営業日数
-
-        retrain_every
-            何営業日ごとにAIを再学習するか
-
-        threshold
-            上昇と判定する確率
-        """
+        # ====================================================
+        # Walk-forward settings
+        # ====================================================
 
         self.initial_train_size = int(
             initial_train_size
@@ -85,444 +130,823 @@ class WalkForwardBacktest:
             retrain_every
         )
 
-        self.threshold = float(
-            threshold
+        self.prediction_threshold = float(
+            prediction_threshold
         )
 
 
-        if self.initial_train_size < 100:
+        # ====================================================
+        # Target settings
+        # ====================================================
+
+        self.target_horizon = int(
+            target_horizon
+        )
+
+        self.target_return_threshold = float(
+            target_return_threshold
+        )
+
+
+        if (
+            self.target_horizon
+            not in SUPPORTED_HORIZONS
+        ):
 
             raise ValueError(
-                "initial_train_sizeは"
-                "100以上にしてください。"
+                "target_horizon は "
+                "1, 3, 5 のいずれかを指定してください。"
             )
 
 
-        if self.test_size < 1:
+        # ====================================================
+        # Model settings
+        # ====================================================
 
-            raise ValueError(
-                "test_sizeは1以上にしてください。"
-            )
+        self.n_estimators = int(
+            n_estimators
+        )
+
+        self.max_depth = max_depth
+
+        self.min_samples_split = int(
+            min_samples_split
+        )
+
+        self.min_samples_leaf = int(
+            min_samples_leaf
+        )
+
+        self.max_features = max_features
+
+        self.random_state = int(
+            random_state
+        )
+
+        self.class_weight = class_weight
+
+        self.n_jobs = int(
+            n_jobs
+        )
 
 
-        if self.retrain_every < 1:
+        # ====================================================
+        # Runtime
+        # ====================================================
 
-            raise ValueError(
-                "retrain_everyは1以上にしてください。"
-            )
-
-
-        if not 0.0 < self.threshold < 1.0:
-
-            raise ValueError(
-                "thresholdは0〜1の間にしてください。"
-            )
-
-
-        # ----------------------------------------------------
-        # 結果保存
-        # ----------------------------------------------------
+        self.feature_columns = []
 
         self.results = pd.DataFrame()
 
         self.metrics = {}
 
-        self.feature_columns = []
-
-        self.training_log = []
+        self.model_count = 0
 
 
     # ========================================================
-    # データ準備
+    # Model factory
     # ========================================================
 
-    def prepare_data(
+    def _create_model(
         self,
-        data,
-        feature_columns=None
     ):
 
-        """
-        ウォークフォワード検証用データを準備する。
+        return RandomForestClassifier(
 
-        Target
-        1 = 翌営業日上昇
-        0 = 翌営業日下落または同値
-        """
+            n_estimators=
+                self.n_estimators,
 
-        if data is None or data.empty:
+            max_depth=
+                self.max_depth,
 
-            raise ValueError(
-                "バックテスト用データがありません。"
-            )
+            min_samples_split=
+                self.min_samples_split,
 
+            min_samples_leaf=
+                self.min_samples_leaf,
 
-        df = data.copy()
+            max_features=
+                self.max_features,
 
+            random_state=
+                self.random_state,
 
-        # ----------------------------------------------------
-        # 時系列順
-        # ----------------------------------------------------
+            class_weight=
+                self.class_weight,
 
-        df.sort_index(
-            inplace=True
+            n_jobs=
+                self.n_jobs,
         )
 
 
-        # ----------------------------------------------------
-        # 特徴量
-        # ----------------------------------------------------
+    # ========================================================
+    # Normalize dataframe
+    # ========================================================
 
-        if feature_columns is None:
+    @staticmethod
+    def _normalize_dataframe(
+        data,
+    ):
 
-            feature_columns = (
-                get_ai_feature_columns(
-                    df
-                )
+        if data is None:
+
+            return pd.DataFrame()
+
+
+        result = data.copy()
+
+
+        if result.empty:
+
+            return result
+
+
+        result.index = pd.to_datetime(
+            result.index
+        )
+
+
+        if getattr(
+            result.index,
+            "tz",
+            None,
+        ) is not None:
+
+            result.index = (
+                result.index
+                .tz_localize(None)
             )
+
+
+        result = result[
+            ~result.index.duplicated(
+                keep="last"
+            )
+        ]
+
+
+        result = result.sort_index()
+
+
+        return result
+
+
+    # ========================================================
+    # Feature columns
+    # ========================================================
+
+    def _get_feature_columns(
+        self,
+        data,
+    ):
+
+        try:
+
+            requested_columns = (
+                get_ai_feature_columns()
+            )
+
+        except Exception:
+
+            requested_columns = []
+
+
+        # ====================================================
+        # features.py のリストを優先
+        # ====================================================
+
+        feature_columns = [
+
+            column
+
+            for column
+            in requested_columns
+
+            if column in data.columns
+        ]
+
+
+        # ====================================================
+        # 万一取得できなかった場合
+        # 数値列からTarget関連を除外
+        # ====================================================
+
+        if not feature_columns:
+
+            excluded_columns = {
+
+                "Target",
+
+                "Future_Return",
+
+                "Entry_Open",
+
+                "Future_Close",
+            }
+
+
+            feature_columns = [
+
+                column
+
+                for column
+                in data.columns
+
+                if (
+                    column
+                    not in excluded_columns
+
+                    and
+
+                    pd.api.types
+                    .is_numeric_dtype(
+                        data[column]
+                    )
+                )
+            ]
 
 
         if not feature_columns:
 
             raise ValueError(
-                "AI特徴量がありません。"
+                "AI学習に使用できる特徴量がありません。"
             )
 
 
-        feature_columns = list(
-            dict.fromkeys(
-                feature_columns
+        return feature_columns
+
+
+    # ========================================================
+    # Prepare target
+    # ========================================================
+
+    def prepare_data(
+        self,
+        ai_data,
+    ):
+
+        data = (
+            self._normalize_dataframe(
+                ai_data
             )
         )
+
+
+        if data.empty:
+
+            raise ValueError(
+                "ai_data が空です。"
+            )
+
+
+        # ====================================================
+        # 必須列
+        # ====================================================
+
+        required_columns = [
+            "Open",
+            "Close",
+        ]
 
 
         missing_columns = [
 
             column
 
-            for column in feature_columns
+            for column
+            in required_columns
 
-            if column not in df.columns
+            if column not in data.columns
         ]
 
 
         if missing_columns:
 
             raise ValueError(
-
-                "必要な特徴量がありません："
-
+                "ai_data に必要な列がありません: "
                 + ", ".join(
                     missing_columns
                 )
             )
 
 
-        if "Close" not in df.columns:
+        # ====================================================
+        # Numeric
+        # ====================================================
 
-            raise ValueError(
-                "Close列がありません。"
-            )
-
-
-        # ----------------------------------------------------
-        # 特徴量を数値化
-        # ----------------------------------------------------
-
-        for column in feature_columns:
-
-            df[column] = (
-                pd.to_numeric(
-                    df[column],
-                    errors="coerce"
-                )
-            )
-
-
-        # ----------------------------------------------------
-        # Close数値化
-        # ----------------------------------------------------
-
-        df["Close"] = (
-            pd.to_numeric(
-                df["Close"],
-                errors="coerce"
-            )
+        data[
+            "Open"
+        ] = pd.to_numeric(
+            data[
+                "Open"
+            ],
+            errors="coerce",
         )
 
 
-        # ----------------------------------------------------
-        # 無限大処理
-        # ----------------------------------------------------
-
-        df.replace(
-            [np.inf, -np.inf],
-            np.nan,
-            inplace=True
+        data[
+            "Close"
+        ] = pd.to_numeric(
+            data[
+                "Close"
+            ],
+            errors="coerce",
         )
 
 
-        # ----------------------------------------------------
-        # 翌営業日終値
-        # ----------------------------------------------------
+        # ====================================================
+        # Target
+        #
+        # Signal = t close
+        # Entry  = Open(t+1)
+        # Exit評価 = Close(t+horizon)
+        # ====================================================
 
-        df["Next_Close"] = (
-            df["Close"]
+        data[
+            "Entry_Open"
+        ] = (
+
+            data[
+                "Open"
+            ]
             .shift(-1)
         )
 
 
-        # ----------------------------------------------------
-        # 翌営業日リターン
-        # ----------------------------------------------------
+        data[
+            "Future_Close"
+        ] = (
 
-        df["Next_Return"] = (
-            df["Next_Close"]
-            / df["Close"]
-            - 1
+            data[
+                "Close"
+            ]
+            .shift(
+                -self.target_horizon
+            )
         )
 
 
-        # ----------------------------------------------------
-        # 正解
-        # ----------------------------------------------------
+        data[
+            "Future_Return"
+        ] = (
 
-        df["Target"] = np.where(
+            data[
+                "Future_Close"
+            ]
 
-            df["Next_Close"].notna(),
+            /
 
-            (
-                df["Next_Close"]
-                > df["Close"]
-            ).astype(int),
+            data[
+                "Entry_Open"
+            ]
 
-            np.nan
+            - 1.0
         )
 
 
-        # ----------------------------------------------------
-        # 必要列が揃った日のみ
-        # ----------------------------------------------------
+        # ====================================================
+        # TargetはNaNを先に維持
+        #
+        # Future_Returnがない末尾を
+        # 誤って0クラスにしない
+        # ====================================================
 
-        required_columns = (
-            feature_columns
+        target = pd.Series(
+            np.nan,
+            index=data.index,
+            dtype="float64",
+        )
+
+
+        valid_target = (
+            data[
+                "Future_Return"
+            ].notna()
+        )
+
+
+        target.loc[
+            valid_target
+        ] = (
+
+            data.loc[
+                valid_target,
+                "Future_Return",
+            ]
+
+            >
+
+            self.target_return_threshold
+        ).astype(int)
+
+
+        data[
+            "Target"
+        ] = target
+
+
+        # ====================================================
+        # Feature columns
+        # ====================================================
+
+        self.feature_columns = (
+            self._get_feature_columns(
+                data
+            )
+        )
+
+
+        # ====================================================
+        # Numeric conversion
+        # ====================================================
+
+        for column in self.feature_columns:
+
+            data[
+                column
+            ] = pd.to_numeric(
+                data[
+                    column
+                ],
+                errors="coerce",
+            )
+
+
+        # ====================================================
+        # inf -> NaN
+        # ====================================================
+
+        data.replace(
+            [
+                np.inf,
+                -np.inf,
+            ],
+            np.nan,
+            inplace=True,
+        )
+
+
+        # ====================================================
+        # 特徴量が揃っている行だけ残す
+        #
+        # Target NaNの最新行は
+        # Walk-forward評価には使わないため
+        # ここではTargetも必須
+        # ====================================================
+
+        required_for_backtest = (
+
+            self.feature_columns
+
             + [
-                "Close",
-                "Next_Close",
-                "Next_Return",
-                "Target"
+                "Entry_Open",
+                "Future_Close",
+                "Future_Return",
+                "Target",
             ]
         )
 
 
-        df = df.dropna(
-            subset=required_columns
-        ).copy()
-
-
-        if len(df) <= self.initial_train_size:
-
-            raise ValueError(
-
-                "ウォークフォワード検証に必要な"
-                "データが不足しています。"
-
-                f" 使用可能データ={len(df)}件、"
-
-                f" initial_train_size="
-                f"{self.initial_train_size}件"
+        prepared = (
+            data
+            .dropna(
+                subset=
+                    required_for_backtest
             )
+            .copy()
+        )
 
 
-        df["Target"] = (
-            df["Target"]
+        prepared[
+            "Target"
+        ] = (
+
+            prepared[
+                "Target"
+            ]
             .astype(int)
         )
 
 
-        self.feature_columns = (
-            feature_columns.copy()
-        )
-
-
-        return df
-
-
-    # ========================================================
-    # AIモデル作成
-    # ========================================================
-
-    @staticmethod
-    def create_model():
-
-        """
-        各ウォークフォワード学習で
-        新しいAIモデルを作成する。
-        """
-
-        return StockPredictionModel()
-
-
-    # ========================================================
-    # AIを過去データだけで学習
-    # ========================================================
-
-    def train_model(
-        self,
-        train_data
-    ):
-
-        """
-        train_dataのみを使って
-        Random Forestを学習する。
-
-        StockPredictionModel.train()は内部で
-        さらに80/20分割するため、
-        ウォークフォワードでは直接
-        sklearnモデルを学習させる。
-        """
-
-        model = self.create_model()
-
-
-        X_train = train_data[
-            self.feature_columns
-        ].copy()
-
-
-        y_train = train_data[
-            "Target"
-        ].copy()
-
-
-        # ----------------------------------------------------
-        # 上昇 / 下落の両クラス確認
-        # ----------------------------------------------------
-
-        if y_train.nunique() < 2:
+        if prepared.empty:
 
             raise ValueError(
-                "学習期間に上昇・下落の"
-                "両クラスがありません。"
+                "ターゲット作成後のデータが空です。"
             )
 
 
-        # ----------------------------------------------------
-        # 学習
-        # ----------------------------------------------------
-
-        model.feature_columns = (
-            self.feature_columns.copy()
-        )
-
-
-        model.model.fit(
-            X_train,
-            y_train
-        )
-
-
-        model.is_trained = True
-
-
-        return model
+        return prepared
 
 
     # ========================================================
-    # ウォークフォワード実行
+    # Purged training data
+    # ========================================================
+
+    def _get_purged_training_data(
+        self,
+        data,
+        test_start_position,
+    ):
+
+        # ====================================================
+        # 重要:
+        #
+        # test_start_position の日の予測を行う時点では、
+        # 直近 target_horizon 日分のTarget結果は
+        # まだ確定していない可能性があります。
+        #
+        # 例:
+        # target_horizon = 3
+        #
+        # test開始 = t
+        #
+        # t-1 のTargetは
+        # Close(t+2)を必要とするため
+        # t時点では未知。
+        #
+        # したがって、
+        #
+        # train_end =
+        # test_start_position - target_horizon
+        #
+        # とします。
+        # ====================================================
+
+        train_end_position = (
+
+            test_start_position
+
+            - self.target_horizon
+        )
+
+
+        if train_end_position <= 0:
+
+            return pd.DataFrame()
+
+
+        train_data = (
+            data.iloc[
+                :train_end_position
+            ]
+            .copy()
+        )
+
+
+        return train_data
+
+
+    # ========================================================
+    # Probability helper
+    # ========================================================
+
+    @staticmethod
+    def _probability_up(
+        model,
+        features,
+    ):
+
+        probabilities = (
+            model.predict_proba(
+                features
+            )
+        )
+
+
+        classes = list(
+            model.classes_
+        )
+
+
+        if 1 in classes:
+
+            class_index = (
+                classes.index(
+                    1
+                )
+            )
+
+
+            return probabilities[
+                :,
+                class_index
+            ]
+
+
+        # ====================================================
+        # 学習データが全て0の場合
+        # ====================================================
+
+        return np.zeros(
+            len(
+                features
+            ),
+            dtype=float,
+        )
+
+
+    # ========================================================
+    # Walk-forward
     # ========================================================
 
     def run(
         self,
-        data,
-        feature_columns=None
+        ai_data,
     ):
 
-        """
-        ウォークフォワード検証を実行する。
-
-        例
-
-        過去500日
-            ↓
-        AI学習
-            ↓
-        次の20日を予測
-            ↓
-        20日進む
-            ↓
-        過去520日で再学習
-            ↓
-        次の20日を予測
-            ↓
-        繰り返し
-        """
-
-        # ----------------------------------------------------
-        # データ準備
-        # ----------------------------------------------------
-
-        df = self.prepare_data(
-            data=data,
-            feature_columns=feature_columns
+        data = (
+            self.prepare_data(
+                ai_data
+            )
         )
 
 
-        result_rows = []
+        total_rows = len(
+            data
+        )
 
-        self.training_log = []
 
+        # ====================================================
+        # 必要データ量チェック
+        # ====================================================
 
-        # ----------------------------------------------------
-        # 最初のテスト位置
-        # ----------------------------------------------------
+        minimum_required = (
 
-        test_start = (
             self.initial_train_size
+
+            + self.target_horizon
+
+            + 1
         )
 
+
+        if (
+            total_rows
+            < minimum_required
+        ):
+
+            raise ValueError(
+
+                "ウォークフォワード検証に必要な"
+                "データ数が不足しています。"
+
+                f" 現在: {total_rows} 行 /"
+
+                f" 必要: {minimum_required} 行以上"
+            )
+
+
+        # ====================================================
+        # Walk-forward
+        # ====================================================
+
+        result_records = []
+
+        model = None
+
+        last_train_position = None
 
         model_number = 0
 
 
         # ====================================================
-        # 時間を前へ進める
+        # test開始位置
+        #
+        # purge後でも initial_train_size を
+        # 確保するため horizon を追加
         # ====================================================
 
-        while test_start < len(df):
+        test_start = (
 
-            # ------------------------------------------------
-            # 学習期間
-            #
-            # expanding window方式
-            # 過去データをすべて使用
-            # ------------------------------------------------
+            self.initial_train_size
 
-            train_data = df.iloc[
-                :test_start
-            ].copy()
+            + self.target_horizon
+        )
 
 
-            # ------------------------------------------------
-            # テスト期間終了位置
-            # ------------------------------------------------
+        while test_start < total_rows:
 
             test_end = min(
 
                 test_start
                 + self.test_size,
 
-                len(df)
+                total_rows,
             )
 
 
-            # ------------------------------------------------
-            # テスト期間
-            # ------------------------------------------------
+            # =================================================
+            # Purged training set
+            # =================================================
 
-            test_data = df.iloc[
-                test_start:test_end
-            ].copy()
+            train_data = (
+                self._get_purged_training_data(
+
+                    data=data,
+
+                    test_start_position=
+                        test_start,
+                )
+            )
+
+
+            if (
+                len(train_data)
+                < self.initial_train_size
+            ):
+
+                test_start = test_end
+
+                continue
+
+
+            # =================================================
+            # Retrain
+            # =================================================
+
+            should_retrain = (
+
+                model is None
+
+                or
+
+                last_train_position
+                is None
+
+                or
+
+                (
+                    test_start
+                    - last_train_position
+                )
+                >= self.retrain_every
+            )
+
+
+            if should_retrain:
+
+                X_train = (
+                    train_data[
+                        self.feature_columns
+                    ]
+                )
+
+
+                y_train = (
+                    train_data[
+                        "Target"
+                    ]
+                    .astype(int)
+                )
+
+
+                # =============================================
+                # RandomForestは2クラスが理想
+                # =============================================
+
+                if (
+                    y_train.nunique()
+                    < 2
+                ):
+
+                    # -----------------------------------------
+                    # クラスが1種類しかない場合は
+                    # この期間をスキップ
+                    # -----------------------------------------
+
+                    test_start = test_end
+
+                    continue
+
+
+                model = (
+                    self._create_model()
+                )
+
+
+                model.fit(
+                    X_train,
+                    y_train,
+                )
+
+
+                model_number += 1
+
+                last_train_position = (
+                    test_start
+                )
+
+
+            # =================================================
+            # Test block
+            # =================================================
+
+            test_data = (
+                data.iloc[
+                    test_start:test_end
+                ]
+                .copy()
+            )
 
 
             if test_data.empty:
@@ -530,253 +954,188 @@ class WalkForwardBacktest:
                 break
 
 
-            # ------------------------------------------------
-            # AI学習
-            # ------------------------------------------------
-
-            model = self.train_model(
-                train_data
+            X_test = (
+                test_data[
+                    self.feature_columns
+                ]
             )
 
 
-            model_number += 1
-
-
-            # ------------------------------------------------
-            # 学習ログ
-            # ------------------------------------------------
-
-            self.training_log.append(
-
-                {
-
-                    "model_number":
-                        model_number,
-
-                    "train_start":
-                        train_data.index[0],
-
-                    "train_end":
-                        train_data.index[-1],
-
-                    "train_samples":
-                        len(train_data),
-
-                    "test_start":
-                        test_data.index[0],
-
-                    "test_end":
-                        test_data.index[-1],
-
-                    "test_samples":
-                        len(test_data)
-                }
+            probabilities_up = (
+                self._probability_up(
+                    model,
+                    X_test,
+                )
             )
 
 
+            predictions = (
+
+                probabilities_up
+
+                >= self.prediction_threshold
+            ).astype(int)
+
+
             # =================================================
-            # テスト期間を1日ずつ予測
+            # Save results
             # =================================================
 
-            for date, row in test_data.iterrows():
-
-                X_test = pd.DataFrame(
-
-                    [
-                        row[
-                            self.feature_columns
-                        ].values
-                    ],
-
-                    columns=self.feature_columns,
-
-                    index=[date]
-                )
-
-
-                X_test = X_test.astype(
-                    float
-                )
-
-
-                # --------------------------------------------
-                # 上昇確率
-                # --------------------------------------------
-
-                probability_matrix = (
-                    model.model.predict_proba(
-                        X_test
-                    )
-                )
-
-
-                classes = list(
-                    model.model.classes_
-                )
-
-
-                if 1 not in classes:
-
-                    continue
-
-
-                up_index = (
-                    classes.index(1)
-                )
-
+            for row_number, (
+                date,
+                row,
+            ) in enumerate(
+                test_data.iterrows()
+            ):
 
                 probability_up = float(
-
-                    probability_matrix[
-                        0,
-                        up_index
+                    probabilities_up[
+                        row_number
                     ]
                 )
 
 
-                probability_down = (
-                    1.0
-                    - probability_up
+                prediction = int(
+                    predictions[
+                        row_number
+                    ]
                 )
 
 
-                # --------------------------------------------
-                # AI方向予測
-                # --------------------------------------------
-
-                prediction = (
-
-                    1
-
-                    if probability_up
-                    >= self.threshold
-
-                    else 0
+                actual = int(
+                    row[
+                        "Target"
+                    ]
                 )
 
 
-                # --------------------------------------------
-                # 結果保存
-                # --------------------------------------------
+                result_records.append({
 
-                result_rows.append(
+                    "Date":
+                        date,
 
-                    {
+                    "Probability_Up":
+                        probability_up,
 
-                        "Date":
-                            date,
+                    "Probability_Down":
+                        float(
+                            1.0
+                            - probability_up
+                        ),
 
-                        "Model_Number":
-                            model_number,
+                    "Prediction":
+                        prediction,
 
-                        "Close":
-                            float(
-                                row["Close"]
-                            ),
+                    "Actual":
+                        actual,
 
-                        "Next_Close":
-                            float(
-                                row["Next_Close"]
-                            ),
+                    "Entry_Open":
+                        float(
+                            row[
+                                "Entry_Open"
+                            ]
+                        ),
 
-                        "Next_Return":
-                            float(
-                                row["Next_Return"]
-                            ),
+                    "Future_Close":
+                        float(
+                            row[
+                                "Future_Close"
+                            ]
+                        ),
 
-                        "Actual":
-                            int(
-                                row["Target"]
-                            ),
+                    "Future_Return":
+                        float(
+                            row[
+                                "Future_Return"
+                            ]
+                        ),
 
-                        "Prediction":
-                            int(
-                                prediction
-                            ),
+                    "Correct":
+                        bool(
+                            prediction
+                            == actual
+                        ),
 
-                        "Probability_Up":
-                            probability_up,
+                    "Target_Horizon":
+                        int(
+                            self.target_horizon
+                        ),
 
-                        "Probability_Down":
-                            probability_down,
+                    "Target_Return_Threshold":
+                        float(
+                            self.target_return_threshold
+                        ),
 
-                        "Correct":
-                            int(
-                                prediction
-                                ==
-                                int(
-                                    row["Target"]
-                                )
-                            )
-                    }
-                )
+                    "Model_Number":
+                        int(
+                            model_number
+                        ),
 
-
-            # ------------------------------------------------
-            # 次の期間へ
-            #
-            # 現在はtest_sizeとretrain_everyの
-            # 小さい方を使って進める。
-            # ------------------------------------------------
-
-            step_size = min(
-                self.test_size,
-                self.retrain_every
-            )
+                    "Engine_Version":
+                        BACKTEST_ENGINE_VERSION,
+                })
 
 
-            test_start += (
-                step_size
-            )
+            # =================================================
+            # Next block
+            # =================================================
+
+            test_start = test_end
 
 
         # ====================================================
-        # 結果DataFrame
+        # Results
         # ====================================================
 
         self.results = pd.DataFrame(
-            result_rows
+            result_records
         )
 
 
         if self.results.empty:
 
             raise ValueError(
-                "ウォークフォワード結果がありません。"
+                "ウォークフォワード検証結果が"
+                "作成できませんでした。"
             )
 
 
-        self.results.set_index(
-            "Date",
-            inplace=True
+        self.results[
+            "Date"
+        ] = pd.to_datetime(
+            self.results[
+                "Date"
+            ]
         )
 
 
-        self.results.sort_index(
-            inplace=True
-        )
+        self.results = (
 
-
-        # ----------------------------------------------------
-        # 同じ日が重複した場合
-        #
-        # test_sizeとretrain_everyが異なる場合の
-        # 重複を安全に処理
-        # ----------------------------------------------------
-
-        self.results = self.results[
-            ~self.results.index.duplicated(
-                keep="last"
+            self.results
+            .drop_duplicates(
+                subset=[
+                    "Date"
+                ],
+                keep="last",
             )
-        ]
+            .set_index(
+                "Date"
+            )
+            .sort_index()
+        )
 
 
-        # ----------------------------------------------------
-        # 評価指標
-        # ----------------------------------------------------
+        self.model_count = int(
+            model_number
+        )
+
+
+        # ====================================================
+        # Metrics
+        # ====================================================
 
         self.metrics = (
-            self.calculate_metrics(
+            self._calculate_metrics(
                 self.results
             )
         )
@@ -784,241 +1143,320 @@ class WalkForwardBacktest:
 
         return (
             self.results.copy(),
-            self.metrics.copy()
+            dict(
+                self.metrics
+            ),
         )
 
 
     # ========================================================
-    # 評価指標
+    # Metrics
     # ========================================================
 
-    def calculate_metrics(
+    def _calculate_metrics(
         self,
-        results
+        results,
     ):
 
-        """
-        ウォークフォワード全期間の
-        AI予測能力を評価する。
-        """
-
-        if results is None or results.empty:
+        if results.empty:
 
             return {}
 
 
-        y_true = (
-            results["Actual"]
+        actual = (
+            pd.to_numeric(
+                results[
+                    "Actual"
+                ],
+                errors="coerce",
+            )
+            .fillna(0)
             .astype(int)
         )
 
 
-        y_pred = (
-            results["Prediction"]
+        prediction = (
+            pd.to_numeric(
+                results[
+                    "Prediction"
+                ],
+                errors="coerce",
+            )
+            .fillna(0)
             .astype(int)
         )
 
 
-        probabilities = (
-            results["Probability_Up"]
-            .astype(float)
+        probability = (
+            pd.to_numeric(
+                results[
+                    "Probability_Up"
+                ],
+                errors="coerce",
+            )
         )
 
 
-        # ----------------------------------------------------
-        # Accuracy
-        # ----------------------------------------------------
+        future_return = (
+            pd.to_numeric(
+                results[
+                    "Future_Return"
+                ],
+                errors="coerce",
+            )
+        )
 
-        accuracy = (
+
+        # ====================================================
+        # Standard metrics
+        # ====================================================
+
+        accuracy = float(
             accuracy_score(
-                y_true,
-                y_pred
+                actual,
+                prediction,
             )
         )
 
 
-        # ----------------------------------------------------
-        # Precision
-        # ----------------------------------------------------
-
-        precision = (
+        precision = float(
             precision_score(
-                y_true,
-                y_pred,
-                zero_division=0
+                actual,
+                prediction,
+                zero_division=0,
             )
         )
 
 
-        # ----------------------------------------------------
-        # Recall
-        # ----------------------------------------------------
-
-        recall = (
+        recall = float(
             recall_score(
-                y_true,
-                y_pred,
-                zero_division=0
+                actual,
+                prediction,
+                zero_division=0,
             )
         )
 
 
-        # ----------------------------------------------------
-        # F1
-        # ----------------------------------------------------
-
-        f1 = (
+        f1 = float(
             f1_score(
-                y_true,
-                y_pred,
-                zero_division=0
+                actual,
+                prediction,
+                zero_division=0,
             )
         )
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # AUC
-        # ----------------------------------------------------
+        # ====================================================
 
-        try:
+        if (
+            actual.nunique()
+            >= 2
 
-            if y_true.nunique() >= 2:
+            and
 
-                auc = (
+            probability.notna().any()
+        ):
+
+            try:
+
+                auc = float(
                     roc_auc_score(
-                        y_true,
-                        probabilities
+                        actual,
+                        probability,
                     )
                 )
 
-            else:
+            except Exception:
 
-                auc = np.nan
+                auc = None
+
+        else:
+
+            auc = None
 
 
-        except ValueError:
+        # ====================================================
+        # Confusion matrix
+        # ====================================================
 
-            auc = np.nan
-
-
-        # ----------------------------------------------------
-        # 混同行列
-        # ----------------------------------------------------
-
-        cm = confusion_matrix(
-            y_true,
-            y_pred,
+        matrix = confusion_matrix(
+            actual,
+            prediction,
             labels=[
+                0,
+                1,
+            ],
+        )
+
+
+        tn = int(
+            matrix[
+                0,
+                0
+            ]
+        )
+
+        fp = int(
+            matrix[
                 0,
                 1
             ]
         )
 
-
-        tn = int(
-            cm[0, 0]
-        )
-
-        fp = int(
-            cm[0, 1]
-        )
-
         fn = int(
-            cm[1, 0]
+            matrix[
+                1,
+                0
+            ]
         )
 
         tp = int(
-            cm[1, 1]
-        )
-
-
-        # ----------------------------------------------------
-        # 実際の上昇日割合
-        # ----------------------------------------------------
-
-        actual_up_rate = float(
-            y_true.mean()
-        )
-
-
-        # ----------------------------------------------------
-        # AIが上昇と予測した割合
-        # ----------------------------------------------------
-
-        predicted_up_rate = float(
-            y_pred.mean()
-        )
-
-
-        # ----------------------------------------------------
-        # 上昇予測日の平均翌日リターン
-        # ----------------------------------------------------
-
-        predicted_up_returns = (
-            results.loc[
-                results["Prediction"] == 1,
-                "Next_Return"
+            matrix[
+                1,
+                1
             ]
         )
 
 
-        if len(predicted_up_returns) > 0:
+        # ====================================================
+        # Counts
+        # ====================================================
 
-            average_return_when_up = float(
+        prediction_count = int(
+            len(
+                results
+            )
+        )
+
+
+        actual_up_count = int(
+            (
+                actual == 1
+            ).sum()
+        )
+
+
+        actual_down_count = int(
+            (
+                actual == 0
+            ).sum()
+        )
+
+
+        predicted_up_count = int(
+            (
+                prediction == 1
+            ).sum()
+        )
+
+
+        predicted_down_count = int(
+            (
+                prediction == 0
+            ).sum()
+        )
+
+
+        # ====================================================
+        # Return statistics
+        # ====================================================
+
+        average_future_return = (
+
+            float(
+                future_return.mean()
+            )
+
+            if future_return.notna().any()
+
+            else None
+        )
+
+
+        predicted_up_returns = (
+            future_return[
+                prediction == 1
+            ]
+        )
+
+
+        predicted_down_returns = (
+            future_return[
+                prediction == 0
+            ]
+        )
+
+
+        average_return_predicted_up = (
+
+            float(
                 predicted_up_returns.mean()
             )
 
-        else:
+            if predicted_up_returns
+            .notna()
+            .any()
 
-            average_return_when_up = 0.0
-
-
-        # ----------------------------------------------------
-        # 下落予測日の平均翌日リターン
-        # ----------------------------------------------------
-
-        predicted_down_returns = (
-            results.loc[
-                results["Prediction"] == 0,
-                "Next_Return"
-            ]
+            else None
         )
 
 
-        if len(predicted_down_returns) > 0:
+        average_return_predicted_down = (
 
-            average_return_when_down = float(
+            float(
                 predicted_down_returns.mean()
             )
 
-        else:
+            if predicted_down_returns
+            .notna()
+            .any()
 
-            average_return_when_down = 0.0
+            else None
+        )
 
 
-        # ----------------------------------------------------
-        # 高確率予測
+        # ====================================================
+        # High confidence
         #
-        # 60%以上
-        # ----------------------------------------------------
+        # 0.60以上を上昇高信頼として参考表示
+        # ====================================================
 
-        high_confidence = results[
-            results["Probability_Up"]
+        high_confidence_mask = (
+
+            probability
             >= 0.60
-        ]
+        )
 
 
-        if len(high_confidence) > 0:
+        high_confidence_count = int(
+            high_confidence_mask.sum()
+        )
+
+
+        if high_confidence_count > 0:
 
             high_confidence_accuracy = float(
-                high_confidence[
-                    "Correct"
-                ].mean()
+
+                (
+                    actual[
+                        high_confidence_mask
+                    ]
+
+                    ==
+
+                    prediction[
+                        high_confidence_mask
+                    ]
+                ).mean()
             )
 
-            high_confidence_return = float(
-                high_confidence[
-                    "Next_Return"
+
+            high_confidence_avg_return = float(
+
+                future_return[
+                    high_confidence_mask
                 ].mean()
             )
 
@@ -1026,71 +1464,81 @@ class WalkForwardBacktest:
 
             high_confidence_accuracy = None
 
-            high_confidence_return = None
+            high_confidence_avg_return = None
 
 
-        # ----------------------------------------------------
-        # 評価結果
-        # ----------------------------------------------------
+        # ====================================================
+        # Metrics dictionary
+        # ====================================================
 
-        metrics = {
+        return {
 
-            "samples":
+            # ================================================
+            # Version
+            # ================================================
+
+            "engine_version":
+                BACKTEST_ENGINE_VERSION,
+
+            # ================================================
+            # Target
+            # ================================================
+
+            "target_horizon":
                 int(
-                    len(results)
+                    self.target_horizon
                 ),
+
+            "target_return_threshold":
+                float(
+                    self.target_return_threshold
+                ),
+
+            "target_definition":
+                (
+                    "Close(t+horizon) / "
+                    "Open(t+1) - 1"
+                ),
+
+            "purge_days":
+                int(
+                    self.target_horizon
+                ),
+
+            # ================================================
+            # Model / predictions
+            # ================================================
+
+            "model_count":
+                int(
+                    self.model_count
+                ),
+
+            "prediction_count":
+                prediction_count,
+
+            # ================================================
+            # Classification
+            # ================================================
 
             "accuracy":
-                float(
-                    accuracy
-                ),
+                accuracy,
 
             "precision":
-                float(
-                    precision
-                ),
+                precision,
 
             "recall":
-                float(
-                    recall
-                ),
+                recall,
 
             "f1":
-                float(
-                    f1
-                ),
+                f1,
 
             "auc":
-                (
-                    float(auc)
+                auc,
 
-                    if not np.isnan(auc)
-
-                    else None
-                ),
-
-            "actual_up_rate":
-                actual_up_rate,
-
-            "predicted_up_rate":
-                predicted_up_rate,
-
-            "average_return_when_up":
-                average_return_when_up,
-
-            "average_return_when_down":
-                average_return_when_down,
-
-            "high_confidence_samples":
-                int(
-                    len(high_confidence)
-                ),
-
-            "high_confidence_accuracy":
-                high_confidence_accuracy,
-
-            "high_confidence_return":
-                high_confidence_return,
+            # ================================================
+            # Confusion matrix
+            # ================================================
 
             "true_negative":
                 tn,
@@ -1104,140 +1552,161 @@ class WalkForwardBacktest:
             "true_positive":
                 tp,
 
-            "model_count":
-                int(
-                    len(
-                        self.training_log
-                    )
-                ),
+            # ================================================
+            # Counts
+            # ================================================
 
-            "threshold":
-                float(
-                    self.threshold
-                )
+            "actual_up_count":
+                actual_up_count,
+
+            "actual_down_count":
+                actual_down_count,
+
+            "predicted_up_count":
+                predicted_up_count,
+
+            "predicted_down_count":
+                predicted_down_count,
+
+            # ================================================
+            # Return
+            # ================================================
+
+            "average_future_return":
+                average_future_return,
+
+            "average_return_predicted_up":
+                average_return_predicted_up,
+
+            "average_return_predicted_down":
+                average_return_predicted_down,
+
+            # ================================================
+            # High confidence
+            # ================================================
+
+            "high_confidence_count":
+                high_confidence_count,
+
+            "high_confidence_accuracy":
+                high_confidence_accuracy,
+
+            "high_confidence_avg_return":
+                high_confidence_avg_return,
         }
 
 
-        return metrics
-
-
     # ========================================================
-    # 学習ログ
-    # ========================================================
-
-    def get_training_log(
-        self
-    ):
-
-        """
-        AIがいつ、どの期間で
-        再学習したかを取得する。
-        """
-
-        if not self.training_log:
-
-            return pd.DataFrame()
-
-
-        return pd.DataFrame(
-            self.training_log
-        )
-
-
-    # ========================================================
-    # 結果取得
+    # Getter
     # ========================================================
 
     def get_results(
-        self
-    ):
-
-        """
-        ウォークフォワード結果を取得する。
-        """
-
-        return (
-            self.results.copy()
-        )
-
-
-    # ========================================================
-    # 高確率予測のみ取得
-    # ========================================================
-
-    def get_high_confidence_results(
         self,
-        probability=0.60
     ):
 
-        """
-        指定した上昇確率以上の
-        AI予測だけ取得する。
-        """
-
-        if self.results.empty:
-
-            return pd.DataFrame()
+        return self.results.copy()
 
 
-        return (
-            self.results[
-                self.results[
-                    "Probability_Up"
-                ]
-                >= probability
-            ]
-            .copy()
+    def get_metrics(
+        self,
+    ):
+
+        return dict(
+            self.metrics
         )
 
 
-# ============================================================
-# 簡単実行関数
-# ============================================================
+    def get_target_info(
+        self,
+    ):
 
-def run_walk_forward_backtest(
-    data,
-    feature_columns=None,
-    initial_train_size=500,
-    test_size=20,
-    retrain_every=20,
-    threshold=0.50
-):
+        return {
 
-    """
-    ウォークフォワード検証を
-    一度に実行する便利関数。
-    """
+            "target_horizon":
+                int(
+                    self.target_horizon
+                ),
 
-    engine = WalkForwardBacktest(
+            "target_return_threshold":
+                float(
+                    self.target_return_threshold
+                ),
 
-        initial_train_size=
-            initial_train_size,
+            "entry_price":
+                "Open(t+1)",
 
-        test_size=
-            test_size,
+            "evaluation_price":
+                (
+                    f"Close(t+"
+                    f"{self.target_horizon})"
+                ),
 
-        retrain_every=
-            retrain_every,
+            "target_definition":
+                (
+                    "Future_Return > "
+                    "target_return_threshold"
+                ),
 
-        threshold=
-            threshold
-    )
+            "purge_days":
+                int(
+                    self.target_horizon
+                ),
 
-
-    results, metrics = (
-        engine.run(
-
-            data=data,
-
-            feature_columns=
-                feature_columns
-        )
-    )
+            "engine_version":
+                BACKTEST_ENGINE_VERSION,
+        }
 
 
-    return (
-        engine,
-        results,
-        metrics
-    )
+    def get_engine_info(
+        self,
+    ):
+
+        return {
+
+            "engine":
+                "WalkForwardBacktest",
+
+            "version":
+                BACKTEST_ENGINE_VERSION,
+
+            "method":
+                "Expanding Walk-Forward",
+
+            "purged":
+                True,
+
+            "purge_days":
+                int(
+                    self.target_horizon
+                ),
+
+            "initial_train_size":
+                int(
+                    self.initial_train_size
+                ),
+
+            "test_size":
+                int(
+                    self.test_size
+                ),
+
+            "retrain_every":
+                int(
+                    self.retrain_every
+                ),
+
+            "prediction_threshold":
+                float(
+                    self.prediction_threshold
+                ),
+
+            "target_horizon":
+                int(
+                    self.target_horizon
+                ),
+
+            "target_return_threshold":
+                float(
+                    self.target_return_threshold
+                ),
+        }
