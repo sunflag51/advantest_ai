@@ -2,14 +2,17 @@
 # アドバンテスト AI売買分析システム
 # main.py
 #
-# st.session_state 対応 完全版
+# 完全版
 #
-# ①～⑫
-#   一度実行した結果を session_state に保存
-#
-# ⑬
-#   バックテスト資金・最大投資比率を変更して
-#   ⑬だけ再計算可能
+# ・①～⑫を st.session_state に保存
+# ・⑬だけ条件変更して再計算
+# ・バックテスト資金を選択
+# ・最大投資比率を選択
+# ・コピー用バックテスト結果
+# ・成績CSVダウンロード
+# ・売買履歴CSVダウンロード
+# ・見送り履歴CSVダウンロード
+# ・注文ログCSVダウンロード
 # ============================================================
 
 
@@ -100,19 +103,14 @@ INITIAL_CAPITAL = 1_000_000
 # ============================================================
 
 st.set_page_config(
-    page_title=
-        "アドバンテスト AI売買分析",
-
-    page_icon=
-        "📈",
-
-    layout=
-        "wide",
+    page_title="アドバンテスト AI売買分析",
+    page_icon="📈",
+    layout="wide",
 )
 
 
 # ============================================================
-# session_state 初期化
+# session_state 初期値
 # ============================================================
 
 SESSION_DEFAULTS = {
@@ -164,10 +162,9 @@ SESSION_DEFAULTS = {
 }
 
 
-for (
-    key,
-    default_value,
-) in SESSION_DEFAULTS.items():
+for key, default_value in (
+    SESSION_DEFAULTS.items()
+):
 
     if key not in st.session_state:
 
@@ -226,9 +223,7 @@ def safe_float(
                 return default
 
 
-            value = (
-                numeric.iloc[-1]
-            )
+            value = numeric.iloc[-1]
 
 
         if isinstance(
@@ -325,15 +320,52 @@ def format_percent(
 
 
 # ============================================================
-# 分析結果リセット
+# CSV変換
+# ============================================================
+
+def dataframe_to_csv_bytes(
+    dataframe,
+    include_index=False,
+):
+    """
+    ExcelやiPhoneでも日本語が
+    文字化けしにくいUTF-8 BOM付きCSV。
+    """
+
+    if dataframe is None:
+
+        dataframe = pd.DataFrame()
+
+
+    if not isinstance(
+        dataframe,
+        pd.DataFrame,
+    ):
+
+        dataframe = pd.DataFrame(
+            dataframe
+        )
+
+
+    csv_text = dataframe.to_csv(
+        index=include_index
+    )
+
+
+    return csv_text.encode(
+        "utf-8-sig"
+    )
+
+
+# ============================================================
+# 分析リセット
 # ============================================================
 
 def reset_analysis():
 
-    for (
-        key,
-        default_value,
-    ) in SESSION_DEFAULTS.items():
+    for key, default_value in (
+        SESSION_DEFAULTS.items()
+    ):
 
         st.session_state[
             key
@@ -341,14 +373,10 @@ def reset_analysis():
 
 
 # ============================================================
-# ①～⑫ 分析実行関数
+# ①～⑫ 実行
 # ============================================================
 
 def run_base_analysis():
-
-    # --------------------------------------------------------
-    # 古い完了状態を解除
-    # --------------------------------------------------------
 
     st.session_state[
         "analysis_completed"
@@ -360,14 +388,9 @@ def run_base_analysis():
     # ========================================================
 
     stock_data = get_stock_data(
-        stock_code=
-            STOCK_CODE,
-
-        period=
-            "5y",
-
-        interval=
-            "1d",
+        stock_code=STOCK_CODE,
+        period="5y",
+        interval="1d",
     )
 
 
@@ -394,27 +417,21 @@ def run_base_analysis():
 
 
     # ========================================================
-    # ② 市場データ
+    # ② 市場
     # ========================================================
 
     market_data = (
         get_all_market_data(
-            period=
-                "5y",
-
-            interval=
-                "1d",
+            period="5y",
+            interval="1d",
         )
     )
 
 
     latest_market = (
         get_latest_market_values(
-            period=
-                "5d",
-
-            interval=
-                "1d",
+            period="5d",
+            interval="1d",
         )
     )
 
@@ -469,7 +486,7 @@ def run_base_analysis():
 
 
     # ========================================================
-    # ⑥ 最新AI予測
+    # ⑥ 最新予測
     # ========================================================
 
     latest_probability = (
@@ -487,7 +504,7 @@ def run_base_analysis():
 
 
     # ========================================================
-    # ⑧ EntryStrategy
+    # ⑧ Entry
     # ========================================================
 
     entry_result = None
@@ -521,17 +538,10 @@ def run_base_analysis():
 
     walk_engine = (
         WalkForwardBacktest(
-            initial_train_size=
-                500,
-
-            test_size=
-                20,
-
-            retrain_every=
-                20,
-
-            threshold=
-                0.50,
+            initial_train_size=500,
+            test_size=20,
+            retrain_every=20,
+            threshold=0.50,
         )
     )
 
@@ -539,10 +549,8 @@ def run_base_analysis():
     (
         walk_results,
         walk_metrics,
-    ) = (
-        walk_engine.run(
-            ai_data
-        )
+    ) = walk_engine.run(
+        ai_data
     )
 
 
@@ -596,7 +604,7 @@ def run_base_analysis():
 
 
     # ========================================================
-    # session_stateへ保存
+    # session_state 保存
     # ========================================================
 
     st.session_state[
@@ -669,10 +677,6 @@ def run_base_analysis():
     ] = old_backtest_metrics
 
 
-    # --------------------------------------------------------
-    # 最後に完了フラグ
-    # --------------------------------------------------------
-
     st.session_state[
         "analysis_completed"
     ] = True
@@ -690,12 +694,12 @@ st.title(
 st.caption(
     "①～⑫の分析結果を保持し、"
     "⑬の資金条件だけを変更して"
-    "高速に再バックテストできます。"
+    "再バックテストできます。"
 )
 
 
 # ============================================================
-# 上部操作ボタン
+# 操作ボタン
 # ============================================================
 
 button_col1, button_col2 = (
@@ -791,7 +795,7 @@ if not st.session_state[
 
 
 # ============================================================
-# session_stateから取得
+# 保存結果取得
 # ============================================================
 
 stock_data = (
@@ -892,14 +896,9 @@ old_backtest_metrics = (
 )
 
 
-# ============================================================
-# 保存状態表示
-# ============================================================
-
 st.success(
     "💾 ①～⑫の分析結果を保持中です。"
-    "⑬の設定を変更しても"
-    "①～⑫は再計算されません。"
+    "⑬の設定変更では再学習しません。"
 )
 
 
@@ -932,8 +931,7 @@ stock_cols[
     (
         f"{latest_close:,.0f} 円"
 
-        if latest_close
-        is not None
+        if latest_close is not None
 
         else "取得なし"
     ),
@@ -949,8 +947,7 @@ stock_cols[
             latest_date.date()
         )
 
-        if latest_date
-        is not None
+        if latest_date is not None
 
         else "取得なし"
     ),
@@ -1029,9 +1026,9 @@ for index, name in enumerate(
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 市場比較
-# ------------------------------------------------------------
+# ============================================================
 
 normalized_market = (
     pd.DataFrame()
@@ -1362,8 +1359,7 @@ if latest_probability is not None:
         (
             "上昇予測"
 
-            if latest_probability
-            >= 0.50
+            if latest_probability >= 0.50
 
             else "下落予測"
         ),
@@ -1414,7 +1410,7 @@ except Exception as error:
 
 
 # ============================================================
-# ⑧ EntryStrategy
+# ⑧ Entry
 # ============================================================
 
 st.header(
@@ -1461,8 +1457,7 @@ if entry_result is not None:
         (
             f"{latest_probability * 100:.1f}%"
 
-            if latest_probability
-            is not None
+            if latest_probability is not None
 
             else "N/A"
         ),
@@ -1523,10 +1518,7 @@ walk_samples = (
         walk_results
     )
 
-    if (
-        walk_results
-        is not None
-    )
+    if walk_results is not None
 
     else 0
 )
@@ -1690,7 +1682,7 @@ if isinstance(
 
 
 # ============================================================
-# ⑪ EntryStrategy詳細
+# ⑪ 最新Entry判断
 # ============================================================
 
 st.header(
@@ -1728,26 +1720,13 @@ if latest_close is not None:
 
     base_risk_manager = (
         RiskManager(
-            lot_size=
-                100,
-
-            risk_per_trade=
-                0.01,
-
-            max_position_rate=
-                0.50,
-
-            stop_loss_rate=
-                0.05,
-
-            take_profit_rate=
-                0.10,
-
-            commission_rate=
-                0.001,
-
-            slippage_rate=
-                0.001,
+            lot_size=100,
+            risk_per_trade=0.01,
+            max_position_rate=0.50,
+            stop_loss_rate=0.05,
+            take_profit_rate=0.10,
+            commission_rate=0.001,
+            slippage_rate=0.001,
         )
     )
 
@@ -1826,7 +1805,7 @@ if latest_close is not None:
 
     st.caption(
         "⑫は基準条件として"
-        "100万円・最大投資比率50%で表示しています。"
+        "100万円・最大投資比率50%です。"
     )
 
 
@@ -1845,9 +1824,7 @@ st.write(
 
 
 st.write(
-    "設定を変更してもAI学習・"
-    "ウォークフォワード検証は"
-    "再実行されません。"
+    "設定変更時は⑬だけ再計算します。"
 )
 
 
@@ -1986,13 +1963,13 @@ setting_cols[
 
 st.caption(
     "売買単位100株・"
-    "1回の許容リスク1%・"
+    "許容リスク1%・"
     "損切り5%・利益確定10%で検証します。"
 )
 
 
 # ============================================================
-# ⑬だけ実行
+# ⑬ 実行
 # ============================================================
 
 try:
@@ -2067,13 +2044,8 @@ try:
 
 
     # ========================================================
-    # 総合成績
+    # 数値取得
     # ========================================================
-
-    st.subheader(
-        "📊 総合成績"
-    )
-
 
     initial_value = safe_float(
         strategy_metrics.get(
@@ -2104,6 +2076,150 @@ try:
             "total_return"
         ),
         0.0,
+    )
+
+
+    trade_count = int(
+        safe_float(
+            strategy_metrics.get(
+                "trade_count",
+                strategy_metrics.get(
+                    "trades",
+                    0,
+                ),
+            ),
+            0,
+        )
+    )
+
+
+    wins = int(
+        safe_float(
+            strategy_metrics.get(
+                "wins"
+            ),
+            0,
+        )
+    )
+
+
+    losses = int(
+        safe_float(
+            strategy_metrics.get(
+                "losses"
+            ),
+            0,
+        )
+    )
+
+
+    flat = int(
+        safe_float(
+            strategy_metrics.get(
+                "flat"
+            ),
+            0,
+        )
+    )
+
+
+    win_rate = safe_float(
+        strategy_metrics.get(
+            "win_rate"
+        )
+    )
+
+
+    profit_factor = safe_float(
+        strategy_metrics.get(
+            "profit_factor"
+        )
+    )
+
+
+    max_drawdown = safe_float(
+        strategy_metrics.get(
+            "max_drawdown"
+        ),
+        0.0,
+    )
+
+
+    average_holding = safe_float(
+        strategy_metrics.get(
+            "average_holding_days"
+        )
+    )
+
+
+    average_profit = safe_float(
+        strategy_metrics.get(
+            "average_profit"
+        )
+    )
+
+
+    average_profit_rate = safe_float(
+        strategy_metrics.get(
+            "average_profit_rate"
+        )
+    )
+
+
+    gross_profit = safe_float(
+        strategy_metrics.get(
+            "gross_profit"
+        ),
+        0.0,
+    )
+
+
+    gross_loss = safe_float(
+        strategy_metrics.get(
+            "gross_loss"
+        ),
+        0.0,
+    )
+
+
+    best_trade = safe_float(
+        strategy_metrics.get(
+            "best_trade"
+        )
+    )
+
+
+    worst_trade = safe_float(
+        strategy_metrics.get(
+            "worst_trade"
+        )
+    )
+
+
+    skipped_count = int(
+        safe_float(
+            strategy_metrics.get(
+                "skipped_entries"
+            ),
+            0,
+        )
+    )
+
+
+    total_commission = safe_float(
+        strategy_metrics.get(
+            "total_commission"
+        ),
+        0.0,
+    )
+
+
+    # ========================================================
+    # 総合成績
+    # ========================================================
+
+    st.subheader(
+        "📊 総合成績"
     )
 
 
@@ -2164,47 +2280,6 @@ try:
     )
 
 
-    trade_count = int(
-        safe_float(
-            strategy_metrics.get(
-                "trade_count",
-                strategy_metrics.get(
-                    "trades",
-                    0,
-                ),
-            ),
-            0,
-        )
-    )
-
-
-    wins = int(
-        safe_float(
-            strategy_metrics.get(
-                "wins"
-            ),
-            0,
-        )
-    )
-
-
-    losses = int(
-        safe_float(
-            strategy_metrics.get(
-                "losses"
-            ),
-            0,
-        )
-    )
-
-
-    win_rate = safe_float(
-        strategy_metrics.get(
-            "win_rate"
-        )
-    )
-
-
     trade_cols = st.columns(
         4
     )
@@ -2241,8 +2316,7 @@ try:
         (
             f"{win_rate * 100:.1f}%"
 
-            if win_rate
-            is not None
+            if win_rate is not None
 
             else "N/A"
         ),
@@ -2255,46 +2329,6 @@ try:
 
     st.subheader(
         "🛡️ リスク・効率"
-    )
-
-
-    profit_factor = safe_float(
-        strategy_metrics.get(
-            "profit_factor"
-        )
-    )
-
-
-    max_drawdown = safe_float(
-        strategy_metrics.get(
-            "max_drawdown"
-        ),
-        0.0,
-    )
-
-
-    average_holding = safe_float(
-        strategy_metrics.get(
-            "average_holding_days"
-        )
-    )
-
-
-    skipped_count = int(
-        safe_float(
-            strategy_metrics.get(
-                "skipped_entries"
-            ),
-            0,
-        )
-    )
-
-
-    total_commission = safe_float(
-        strategy_metrics.get(
-            "total_commission"
-        ),
-        0.0,
     )
 
 
@@ -2311,8 +2345,7 @@ try:
             f"{profit_factor:.2f}"
 
             if (
-                profit_factor
-                is not None
+                profit_factor is not None
                 and np.isfinite(
                     profit_factor
                 )
@@ -2322,8 +2355,7 @@ try:
                 "∞"
 
                 if (
-                    profit_factor
-                    is not None
+                    profit_factor is not None
                     and np.isinf(
                         profit_factor
                     )
@@ -2352,8 +2384,7 @@ try:
         (
             f"{average_holding:.1f} 日"
 
-            if average_holding
-            is not None
+            if average_holding is not None
 
             else "N/A"
         ),
@@ -2479,6 +2510,439 @@ try:
                 order_log,
                 use_container_width=True,
             )
+
+
+    # ========================================================
+    # ⑬ コピー・保存
+    # ========================================================
+
+    st.divider()
+
+
+    st.subheader(
+        "📋 バックテスト結果をコピー・保存"
+    )
+
+
+    st.write(
+        "下のコピー用テキストは、"
+        "そのままChatGPTに貼り付けて"
+        "分析に使用できます。"
+    )
+
+
+    # --------------------------------------------------------
+    # 表示文字列
+    # --------------------------------------------------------
+
+    if win_rate is None:
+
+        win_rate_text = "N/A"
+
+    else:
+
+        win_rate_text = (
+            f"{win_rate * 100:.1f}%"
+        )
+
+
+    if profit_factor is None:
+
+        profit_factor_text = "N/A"
+
+    elif np.isinf(
+        profit_factor
+    ):
+
+        profit_factor_text = "∞"
+
+    else:
+
+        profit_factor_text = (
+            f"{profit_factor:.2f}"
+        )
+
+
+    if average_holding is None:
+
+        average_holding_text = "N/A"
+
+    else:
+
+        average_holding_text = (
+            f"{average_holding:.1f} 日"
+        )
+
+
+    if average_profit is None:
+
+        average_profit_text = "N/A"
+
+    else:
+
+        average_profit_text = (
+            f"{average_profit:+,.0f} 円"
+        )
+
+
+    if average_profit_rate is None:
+
+        average_profit_rate_text = "N/A"
+
+    else:
+
+        average_profit_rate_text = (
+            f"{average_profit_rate * 100:+.2f}%"
+        )
+
+
+    if best_trade is None:
+
+        best_trade_text = "N/A"
+
+    else:
+
+        best_trade_text = (
+            f"{best_trade:+,.0f} 円"
+        )
+
+
+    if worst_trade is None:
+
+        worst_trade_text = "N/A"
+
+    else:
+
+        worst_trade_text = (
+            f"{worst_trade:+,.0f} 円"
+        )
+
+
+    # --------------------------------------------------------
+    # コピー用テキスト
+    # --------------------------------------------------------
+
+    copy_text = f"""【⑬ 本格戦略バックテスト結果】
+
+銘柄: {STOCK_NAME} ({STOCK_CODE})
+
+■ バックテスト設定
+バックテスト資金: {backtest_capital:,.0f} 円
+最大投資比率: {selected_position_label}
+1回の最大投資額: {maximum_position_value:,.0f} 円
+売買単位: 100 株
+1回の許容リスク: 1.00%
+損切り: 5.00%
+利益確定: 10.00%
+BUY最低AI確率: 55.0%
+BUY最低スコア: 6
+AI SELL基準: 45.0%
+最大保有日数: 10 日
+売買手数料率: 0.10%
+スリッページ率: 0.10%
+
+■ 約定ルール
+当日終値でBUY / SELL判定
+翌営業日の始値で約定
+
+■ 総合成績
+初期資金: {initial_value:,.0f} 円
+最終資産: {final_value:,.0f} 円
+総利益: {total_profit:+,.0f} 円
+総合リターン: {total_return * 100:+.2f}%
+
+■ 取引成績
+取引回数: {trade_count} 回
+勝ち: {wins} 回
+負け: {losses} 回
+引き分け: {flat} 回
+勝率: {win_rate_text}
+
+■ リスク・効率
+プロフィットファクター: {profit_factor_text}
+最大ドローダウン: {max_drawdown * 100:.2f}%
+平均保有日数: {average_holding_text}
+平均損益: {average_profit_text}
+平均損益率: {average_profit_rate_text}
+総利益（勝ち取引）: {gross_profit:+,.0f} 円
+総損失（負け取引）: -{gross_loss:,.0f} 円
+ベストトレード: {best_trade_text}
+ワーストトレード: {worst_trade_text}
+資金管理で見送り: {skipped_count} 回
+累計売買手数料: {total_commission:,.0f} 円
+"""
+
+
+    # --------------------------------------------------------
+    # コピーしやすい表示
+    # --------------------------------------------------------
+
+    st.code(
+        copy_text,
+        language=None,
+    )
+
+
+    st.caption(
+        "iPhoneでは上のテキスト欄の"
+        "コピーアイコン、または長押しで"
+        "コピーできます。"
+    )
+
+
+    # ========================================================
+    # 成績CSV
+    # ========================================================
+
+    summary_data = {
+
+        "銘柄":
+            STOCK_NAME,
+
+        "コード":
+            STOCK_CODE,
+
+        "バックテスト資金":
+            backtest_capital,
+
+        "最大投資比率":
+            max_position_rate,
+
+        "最大投資額":
+            maximum_position_value,
+
+        "売買単位":
+            100,
+
+        "許容リスク率":
+            0.01,
+
+        "損切り率":
+            0.05,
+
+        "利益確定率":
+            0.10,
+
+        "初期資金":
+            initial_value,
+
+        "最終資産":
+            final_value,
+
+        "総利益":
+            total_profit,
+
+        "総合リターン":
+            total_return,
+
+        "取引回数":
+            trade_count,
+
+        "勝ち":
+            wins,
+
+        "負け":
+            losses,
+
+        "引き分け":
+            flat,
+
+        "勝率":
+            win_rate,
+
+        "プロフィットファクター":
+            profit_factor,
+
+        "最大ドローダウン":
+            max_drawdown,
+
+        "平均保有日数":
+            average_holding,
+
+        "平均損益":
+            average_profit,
+
+        "平均損益率":
+            average_profit_rate,
+
+        "総利益_勝ち取引":
+            gross_profit,
+
+        "総損失_負け取引":
+            gross_loss,
+
+        "ベストトレード":
+            best_trade,
+
+        "ワーストトレード":
+            worst_trade,
+
+        "資金管理見送り":
+            skipped_count,
+
+        "累計売買手数料":
+            total_commission,
+    }
+
+
+    summary_df = pd.DataFrame(
+        [
+            summary_data
+        ]
+    )
+
+
+    # ========================================================
+    # ダウンロードボタン
+    # ========================================================
+
+    st.subheader(
+        "📥 CSVダウンロード"
+    )
+
+
+    download_col1, download_col2 = (
+        st.columns(
+            2
+        )
+    )
+
+
+    download_col1.download_button(
+        label=
+            "📥 バックテスト成績CSV",
+
+        data=
+            dataframe_to_csv_bytes(
+                summary_df
+            ),
+
+        file_name=
+            "advantest_backtest_summary.csv",
+
+        mime=
+            "text/csv",
+
+        use_container_width=
+            True,
+    )
+
+
+    download_col2.download_button(
+        label=
+            "📥 売買履歴CSV",
+
+        data=
+            dataframe_to_csv_bytes(
+                strategy_trades
+            ),
+
+        file_name=
+            "advantest_trades.csv",
+
+        mime=
+            "text/csv",
+
+        use_container_width=
+            True,
+
+        disabled=(
+            strategy_trades is None
+            or strategy_trades.empty
+        ),
+    )
+
+
+    download_col3, download_col4 = (
+        st.columns(
+            2
+        )
+    )
+
+
+    download_col3.download_button(
+        label=
+            "📥 見送り履歴CSV",
+
+        data=
+            dataframe_to_csv_bytes(
+                skipped_entries
+            ),
+
+        file_name=
+            "advantest_skipped_entries.csv",
+
+        mime=
+            "text/csv",
+
+        use_container_width=
+            True,
+
+        disabled=(
+            skipped_entries is None
+            or skipped_entries.empty
+        ),
+    )
+
+
+    download_col4.download_button(
+        label=
+            "📥 注文ログCSV",
+
+        data=
+            dataframe_to_csv_bytes(
+                order_log
+            ),
+
+        file_name=
+            "advantest_order_log.csv",
+
+        mime=
+            "text/csv",
+
+        use_container_width=
+            True,
+
+        disabled=(
+            order_log is None
+            or order_log.empty
+        ),
+    )
+
+
+    # ========================================================
+    # 資産推移CSV
+    # ========================================================
+
+    if (
+        strategy_equity is not None
+        and not strategy_equity.empty
+    ):
+
+        equity_download = (
+            strategy_equity
+            .reset_index()
+        )
+
+
+        st.download_button(
+            label=
+                "📥 資産推移CSV",
+
+            data=
+                dataframe_to_csv_bytes(
+                    equity_download
+                ),
+
+            file_name=
+                "advantest_equity_curve.csv",
+
+            mime=
+                "text/csv",
+
+            use_container_width=
+                True,
+        )
 
 
     st.success(
