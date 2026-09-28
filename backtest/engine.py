@@ -1,43 +1,47 @@
 # ============================================================
 # backtest/engine.py
 #
-# WalkForwardBacktest v2.2
+# WalkForwardBacktest v2.3
 #
 # main.py v4 対応
 # ai/model.py v2 対応
 #
 # ============================================================
-# ターゲット
+# Target
 #
-# シグナル日:
-#   t
+# Signal:
+#   t 日終値時点
 #
-# エントリー想定:
-#   Open(t+1)
+# Entry:
+#   Open(t + 1)
 #
-# 評価価格:
-#   Close(t+target_horizon)
+# Evaluation:
+#   Close(t + target_horizon)
 #
 # Future_Return:
-#   Close(t+target_horizon) / Open(t+1) - 1
+#   Close(t + target_horizon)
+#   / Open(t + 1)
+#   - 1
 #
 # Target:
 #   Future_Return > target_return_threshold
 #
-# target_horizon:
+# Supported horizons:
 #   1 / 3 / 5
 #
 # ============================================================
-# v2.2
+# v2.3
 #
-# ・threshold= 対応
+# ・threshold= 互換
 # ・prediction_threshold= 対応
-# ・target_horizon=1/3/5 対応
+# ・target_horizon=1/3/5
 # ・target_return_threshold 対応
 # ・Expanding Walk-Forward
 # ・Purge処理
 # ・未来情報混入対策
-# ・Probability_Up 出力
+# ・Probability_Up
+# ・get_training_log()
+# ・学習期間監査ログ
 # ============================================================
 
 
@@ -45,6 +49,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.ensemble import RandomForestClassifier
+
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -61,7 +66,7 @@ from ai.features import get_ai_feature_columns
 # Version
 # ============================================================
 
-BACKTEST_ENGINE_VERSION = "v2.2"
+BACKTEST_ENGINE_VERSION = "v2.3"
 
 
 # ============================================================
@@ -91,12 +96,12 @@ class WalkForwardBacktest:
         retrain_every=20,
 
         # ----------------------------------------------------
-        # 新仕様
+        # New name
         # ----------------------------------------------------
         prediction_threshold=0.50,
 
         # ----------------------------------------------------
-        # main.py v4 / 旧仕様互換
+        # main.py v4 / old compatibility
         # ----------------------------------------------------
         threshold=None,
 
@@ -128,7 +133,7 @@ class WalkForwardBacktest:
     ):
 
         # ====================================================
-        # Walk-forward settings
+        # Walk-forward
         # ====================================================
 
         self.initial_train_size = int(
@@ -146,15 +151,6 @@ class WalkForwardBacktest:
 
         # ====================================================
         # Threshold compatibility
-        #
-        # main.py v4:
-        #   threshold=
-        #
-        # 新仕様:
-        #   prediction_threshold=
-        #
-        # threshold が渡された場合は
-        # threshold を優先
         # ====================================================
 
         if threshold is not None:
@@ -170,14 +166,14 @@ class WalkForwardBacktest:
             )
 
 
-        # 旧コードから参照される可能性に備える
+        # 旧コード互換
         self.threshold = (
             self.prediction_threshold
         )
 
 
         # ====================================================
-        # Target settings
+        # Target
         # ====================================================
 
         self.target_horizon = int(
@@ -201,7 +197,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Model settings
+        # RandomForest
         # ====================================================
 
         self.n_estimators = int(
@@ -241,11 +237,13 @@ class WalkForwardBacktest:
 
         self.metrics = {}
 
+        self.training_log = pd.DataFrame()
+
         self.model_count = 0
 
 
     # ========================================================
-    # Model factory
+    # Create model
     # ========================================================
 
     def _create_model(
@@ -281,7 +279,7 @@ class WalkForwardBacktest:
 
 
     # ========================================================
-    # Normalize dataframe
+    # Normalize
     # ========================================================
 
     @staticmethod
@@ -342,7 +340,7 @@ class WalkForwardBacktest:
     ):
 
         # ====================================================
-        # ai/features.py の特徴量リストを優先
+        # ai/features.py を優先
         # ====================================================
 
         try:
@@ -368,7 +366,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # 特徴量リストが取得できない場合の保険
+        # Fallback
         # ====================================================
 
         if not feature_columns:
@@ -439,7 +437,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Required columns
+        # Required
         # ====================================================
 
         required_columns = [
@@ -472,7 +470,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Numeric conversion
+        # Numeric
         # ====================================================
 
         data[
@@ -497,14 +495,6 @@ class WalkForwardBacktest:
 
         # ====================================================
         # Target
-        #
-        # t日終値でシグナル
-        #
-        # Entry:
-        #   Open(t+1)
-        #
-        # Evaluation:
-        #   Close(t+horizon)
         # ====================================================
 
         data[
@@ -550,10 +540,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Target
-        #
-        # Future_Return がNaNの末尾を
-        # 誤って0クラスにしない
+        # Target NaN protection
         # ====================================================
 
         target = pd.Series(
@@ -596,7 +583,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Feature columns
+        # Features
         # ====================================================
 
         self.feature_columns = (
@@ -605,10 +592,6 @@ class WalkForwardBacktest:
             )
         )
 
-
-        # ====================================================
-        # Feature numeric conversion
-        # ====================================================
 
         for column in self.feature_columns:
 
@@ -637,7 +620,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Backtestに必要な列
+        # Drop incomplete
         # ====================================================
 
         required_for_backtest = (
@@ -696,12 +679,11 @@ class WalkForwardBacktest:
     ):
 
         # ====================================================
-        # 未来情報混入防止
+        # 例: horizon=3
         #
-        # target_horizon = 3 の場合、
-        # test開始直前の3行は
-        # test開始時点で正解がまだ確定していないため、
-        # 学習データから除外します。
+        # test開始直前の3シグナルについては
+        # test開始時点では正解が確定していないため
+        # 学習から除外
         # ====================================================
 
         train_end_position = (
@@ -763,10 +745,6 @@ class WalkForwardBacktest:
             ]
 
 
-        # ====================================================
-        # 万一0クラスしか存在しない場合
-        # ====================================================
-
         return np.zeros(
             len(
                 features
@@ -776,7 +754,7 @@ class WalkForwardBacktest:
 
 
     # ========================================================
-    # Walk-forward run
+    # Main run
     # ========================================================
 
     def run(
@@ -797,7 +775,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Minimum data
+        # Minimum rows
         # ====================================================
 
         minimum_required = (
@@ -824,10 +802,12 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Results
+        # Runtime reset
         # ====================================================
 
         result_records = []
+
+        training_records = []
 
         model = None
 
@@ -837,9 +817,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # 最初のTest位置
-        #
-        # Purge後にinitial_train_sizeを確保
+        # First test
         # ====================================================
 
         test_start = (
@@ -851,7 +829,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Walk-forward loop
+        # Walk-forward
         # ====================================================
 
         while test_start < total_rows:
@@ -866,7 +844,7 @@ class WalkForwardBacktest:
 
 
             # =================================================
-            # Purged training data
+            # Purged training
             # =================================================
 
             train_data = (
@@ -881,9 +859,7 @@ class WalkForwardBacktest:
 
 
             if (
-                len(
-                    train_data
-                )
+                len(train_data)
                 < self.initial_train_size
             ):
 
@@ -893,7 +869,7 @@ class WalkForwardBacktest:
 
 
             # =================================================
-            # Retrain
+            # Retrain decision
             # =================================================
 
             should_retrain = (
@@ -935,7 +911,7 @@ class WalkForwardBacktest:
 
 
                 # =============================================
-                # 2クラス確認
+                # Need two classes
                 # =============================================
 
                 if (
@@ -943,10 +919,102 @@ class WalkForwardBacktest:
                     < 2
                 ):
 
+                    training_records.append({
+
+                        "Model_Number":
+                            model_number + 1,
+
+                        "Status":
+                            "SKIPPED_ONE_CLASS",
+
+                        "Train_Start":
+                            (
+                                train_data.index[0]
+
+                                if not train_data.empty
+
+                                else pd.NaT
+                            ),
+
+                        "Train_End":
+                            (
+                                train_data.index[-1]
+
+                                if not train_data.empty
+
+                                else pd.NaT
+                            ),
+
+                        "Train_Rows":
+                            int(
+                                len(
+                                    train_data
+                                )
+                            ),
+
+                        "Test_Start":
+                            data.index[
+                                test_start
+                            ],
+
+                        "Test_End":
+                            data.index[
+                                test_end - 1
+                            ],
+
+                        "Test_Rows":
+                            int(
+                                test_end
+                                - test_start
+                            ),
+
+                        "Purge_Days":
+                            int(
+                                self.target_horizon
+                            ),
+
+                        "Target_Horizon":
+                            int(
+                                self.target_horizon
+                            ),
+
+                        "Target_Return_Threshold":
+                            float(
+                                self.target_return_threshold
+                            ),
+
+                        "Prediction_Threshold":
+                            float(
+                                self.prediction_threshold
+                            ),
+
+                        "Class_0_Count":
+                            int(
+                                (
+                                    y_train == 0
+                                ).sum()
+                            ),
+
+                        "Class_1_Count":
+                            int(
+                                (
+                                    y_train == 1
+                                ).sum()
+                            ),
+
+                        "Engine_Version":
+                            BACKTEST_ENGINE_VERSION,
+                    })
+
+
                     test_start = test_end
 
                     continue
 
+
+                # =============================================
+                # Train model
+                # =============================================
 
                 model = (
                     self._create_model()
@@ -961,13 +1029,107 @@ class WalkForwardBacktest:
 
                 model_number += 1
 
+
                 last_train_position = (
                     test_start
                 )
 
 
+                # =============================================
+                # Training audit log
+                # =============================================
+
+                training_records.append({
+
+                    "Model_Number":
+                        int(
+                            model_number
+                        ),
+
+                    "Status":
+                        "TRAINED",
+
+                    "Train_Start":
+                        train_data.index[0],
+
+                    "Train_End":
+                        train_data.index[-1],
+
+                    "Train_Rows":
+                        int(
+                            len(
+                                train_data
+                            )
+                        ),
+
+                    "Test_Start":
+                        data.index[
+                            test_start
+                        ],
+
+                    "Test_End":
+                        data.index[
+                            test_end - 1
+                        ],
+
+                    "Test_Rows":
+                        int(
+                            test_end
+                            - test_start
+                        ),
+
+                    "Purge_Days":
+                        int(
+                            self.target_horizon
+                        ),
+
+                    "Target_Horizon":
+                        int(
+                            self.target_horizon
+                        ),
+
+                    "Target_Return_Threshold":
+                        float(
+                            self.target_return_threshold
+                        ),
+
+                    "Prediction_Threshold":
+                        float(
+                            self.prediction_threshold
+                        ),
+
+                    "Class_0_Count":
+                        int(
+                            (
+                                y_train == 0
+                            ).sum()
+                        ),
+
+                    "Class_1_Count":
+                        int(
+                            (
+                                y_train == 1
+                            ).sum()
+                        ),
+
+                    "Engine_Version":
+                        BACKTEST_ENGINE_VERSION,
+                })
+
+
             # =================================================
-            # Test block
+            # Safety
+            # =================================================
+
+            if model is None:
+
+                test_start = test_end
+
+                continue
+
+
+            # =================================================
+            # Test data
             # =================================================
 
             test_data = (
@@ -1010,7 +1172,7 @@ class WalkForwardBacktest:
 
 
             # =================================================
-            # Save each prediction
+            # Save predictions
             # =================================================
 
             for row_number, (
@@ -1098,9 +1260,19 @@ class WalkForwardBacktest:
                             self.target_return_threshold
                         ),
 
+                    "Prediction_Threshold":
+                        float(
+                            self.prediction_threshold
+                        ),
+
                     "Model_Number":
                         int(
                             model_number
+                        ),
+
+                    "Purge_Days":
+                        int(
+                            self.target_horizon
                         ),
 
                     "Engine_Version":
@@ -1109,14 +1281,23 @@ class WalkForwardBacktest:
 
 
             # =================================================
-            # Next test block
+            # Next block
             # =================================================
 
             test_start = test_end
 
 
         # ====================================================
-        # Results DataFrame
+        # Training log
+        # ====================================================
+
+        self.training_log = pd.DataFrame(
+            training_records
+        )
+
+
+        # ====================================================
+        # Results
         # ====================================================
 
         self.results = pd.DataFrame(
@@ -1226,29 +1407,31 @@ class WalkForwardBacktest:
 
 
         probability = (
-
             pd.to_numeric(
+
                 results[
                     "Probability_Up"
                 ],
+
                 errors="coerce",
             )
         )
 
 
         future_return = (
-
             pd.to_numeric(
+
                 results[
                     "Future_Return"
                 ],
+
                 errors="coerce",
             )
         )
 
 
         # ====================================================
-        # Classification metrics
+        # Classification
         # ====================================================
 
         accuracy = float(
@@ -1400,7 +1583,7 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Future return statistics
+        # Future returns
         # ====================================================
 
         average_future_return = (
@@ -1416,7 +1599,6 @@ class WalkForwardBacktest:
 
 
         predicted_up_returns = (
-
             future_return[
                 prediction == 1
             ]
@@ -1424,7 +1606,6 @@ class WalkForwardBacktest:
 
 
         predicted_down_returns = (
-
             future_return[
                 prediction == 0
             ]
@@ -1511,7 +1692,32 @@ class WalkForwardBacktest:
 
 
         # ====================================================
-        # Return metrics
+        # Training log information
+        # ====================================================
+
+        trained_model_count = 0
+
+
+        if (
+            not self.training_log.empty
+            and
+            "Status"
+            in self.training_log.columns
+        ):
+
+            trained_model_count = int(
+
+                (
+                    self.training_log[
+                        "Status"
+                    ]
+                    == "TRAINED"
+                ).sum()
+            )
+
+
+        # ====================================================
+        # Return
         # ====================================================
 
         return {
@@ -1547,13 +1753,13 @@ class WalkForwardBacktest:
             # Purge
             # ------------------------------------------------
 
+            "purged":
+                True,
+
             "purge_days":
                 int(
                     self.target_horizon
                 ),
-
-            "purged":
-                True,
 
             # ------------------------------------------------
             # Model
@@ -1562,6 +1768,11 @@ class WalkForwardBacktest:
             "model_count":
                 int(
                     self.model_count
+                ),
+
+            "trained_model_count":
+                int(
+                    trained_model_count
                 ),
 
             "prediction_count":
@@ -1587,7 +1798,7 @@ class WalkForwardBacktest:
                 auc,
 
             # ------------------------------------------------
-            # Confusion matrix
+            # Confusion
             # ------------------------------------------------
 
             "true_negative":
@@ -1647,7 +1858,7 @@ class WalkForwardBacktest:
 
 
     # ========================================================
-    # Compatibility aliases
+    # Compatibility
     # ========================================================
 
     def backtest(
@@ -1688,6 +1899,13 @@ class WalkForwardBacktest:
         return dict(
             self.metrics
         )
+
+
+    def get_training_log(
+        self,
+    ):
+
+        return self.training_log.copy()
 
 
     def get_target_info(
@@ -1790,5 +2008,10 @@ class WalkForwardBacktest:
             "target_return_threshold":
                 float(
                     self.target_return_threshold
+                ),
+
+            "model_count":
+                int(
+                    self.model_count
                 ),
         }
