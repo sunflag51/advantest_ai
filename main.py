@@ -1,5 +1,5 @@
 # ============================================================ 
-# main.py v4.3 
+# main.py v4.4 
 # 
 # アドバンテスト AI分析システム 
 # 
@@ -81,7 +81,7 @@ DATA_INTERVAL = "1d"
 # AIターゲット仕様変更のためv4 
 # ============================================================ 
  
-CACHE_VERSION = "v4.3" 
+CACHE_VERSION = "v4.4" 
  
  
 # ============================================================ 
@@ -4026,31 +4026,43 @@ st.success(
     f"（AIターゲット: {target_horizon}日）" 
 )
 
-
 # ============================================================
-# ⑭ BUY確率しきい値比較実験
+# ⑭ BUY確率しきい値比較実験 v4.4
 # ============================================================
 st.header("⑭ BUY確率しきい値比較実験")
 st.info(
     "⑬の現行BUY条件55%は変更しません。"
-    "同じAI予測・同じ売買条件で、BUY最低AI確率だけ50%と55%を比較します。"
+    "BUY最低AI確率だけを 50% / 52.5% / 55% / 57.5% / 60% に変えて比較します。"
 )
+
+EXPERIMENT_THRESHOLDS = [0.50, 0.525, 0.55, 0.575, 0.60]
+CURRENT_THRESHOLD = 0.55
+
 
 def run_threshold_experiment(p):
     engine = TradingBacktestEngine(
-        initial_capital=strategy_initial_capital, lot_size=100,
-        entry_minimum_score=6, entry_minimum_probability=p,
-        entry_strong_probability=0.60, stop_loss_rate=0.05,
-        take_profit_rate=0.10, ai_exit_probability=0.45,
-        max_holding_days=10, minimum_exit_score=3,
-        risk_per_trade=0.01, max_position_rate=strategy_max_position_rate,
-        commission_rate=0.001, slippage_rate=0.001,
+        initial_capital=strategy_initial_capital,
+        lot_size=100,
+        entry_minimum_score=6,
+        entry_minimum_probability=p,
+        entry_strong_probability=0.60,
+        stop_loss_rate=0.05,
+        take_profit_rate=0.10,
+        ai_exit_probability=0.45,
+        max_holding_days=10,
+        minimum_exit_score=3,
+        risk_per_trade=0.01,
+        max_position_rate=strategy_max_position_rate,
+        commission_rate=0.001,
+        slippage_rate=0.001,
     )
     return engine.run(stock_data=stock_data, ai_data=ai_data, walk_results=walk_results)
 
+
 def experiment_row(label, p, m):
     return {
-        "条件": label, "BUY最低AI確率": f"{p*100:.0f}%",
+        "条件": label,
+        "BUY最低AI確率": f"{p*100:g}%",
         "最終資産": safe_float(m.get("final_capital"), strategy_initial_capital),
         "総利益": safe_float(m.get("total_profit"), 0.0),
         "総合リターン": safe_float(m.get("total_return"), 0.0),
@@ -4063,15 +4075,71 @@ def experiment_row(label, p, m):
         "会計整合性": bool(m.get("accounting_ok", False)),
     }
 
-try:
-    with st.spinner("⑭ 50%と55%を同じ条件で比較中..."):
-        trades50, equity50, metrics50 = run_threshold_experiment(0.50)
-        trades55, equity55, metrics55 = strategy_trades, strategy_equity, strategy_metrics
 
-    comparison = pd.DataFrame([
-        experiment_row("実験 50%", 0.50, metrics50),
-        experiment_row("現行 55%", 0.55, metrics55),
-    ])
+def find_trade_date_column(trades):
+    if trades is None or not isinstance(trades, pd.DataFrame) or trades.empty:
+        return None
+    for c in ["Exit_Date", "exit_date", "Sell_Date", "sell_date", "Date", "date"]:
+        if c in trades.columns:
+            return c
+    return None
+
+
+def find_trade_profit_column(trades):
+    if trades is None or not isinstance(trades, pd.DataFrame) or trades.empty:
+        return None
+    for c in ["Net_Profit", "net_profit", "Profit", "profit", "PnL", "pnl"]:
+        if c in trades.columns:
+            return c
+    return None
+
+
+def common_period_half_summary(trades, label, boundary_date):
+    date_col = find_trade_date_column(trades)
+    profit_col = find_trade_profit_column(trades)
+    if date_col is None or profit_col is None:
+        return pd.DataFrame()
+    w = trades.copy()
+    w[date_col] = pd.to_datetime(w[date_col], errors="coerce")
+    w[profit_col] = pd.to_numeric(w[profit_col], errors="coerce")
+    w = w.dropna(subset=[date_col, profit_col]).sort_values(date_col)
+    rows = []
+    for period, part in [
+        ("前半", w[w[date_col] <= boundary_date]),
+        ("後半", w[w[date_col] > boundary_date]),
+    ]:
+        profits = part[profit_col]
+        count = len(part)
+        rows.append({
+            "条件": label,
+            "期間": period,
+            "共通境界日": boundary_date.strftime("%Y-%m-%d"),
+            "取引回数": count,
+            "勝率": (float((profits > 0).sum() / count) if count else None),
+            "純損益合計": (float(profits.sum()) if count else 0.0),
+            "平均損益": (float(profits.mean()) if count else None),
+        })
+    return pd.DataFrame(rows)
+
+
+try:
+    experiment_results = {}
+    with st.spinner("⑭ 5つのBUY確率を同じ条件で比較中..."):
+        for threshold in EXPERIMENT_THRESHOLDS:
+            if abs(threshold - CURRENT_THRESHOLD) < 1e-12:
+                experiment_results[threshold] = (
+                    strategy_trades, strategy_equity, strategy_metrics
+                )
+            else:
+                experiment_results[threshold] = run_threshold_experiment(threshold)
+
+    rows = []
+    for threshold in EXPERIMENT_THRESHOLDS:
+        trades_x, equity_x, metrics_x = experiment_results[threshold]
+        label = "現行 55%" if abs(threshold - CURRENT_THRESHOLD) < 1e-12 else f"実験 {threshold*100:g}%"
+        rows.append(experiment_row(label, threshold, metrics_x))
+    comparison = pd.DataFrame(rows)
+
     display = comparison.copy()
     display["最終資産"] = display["最終資産"].map(lambda x: f"{x:,.0f} 円")
     display["総利益"] = display["総利益"].map(lambda x: f"{x:+,.0f} 円")
@@ -4083,64 +4151,76 @@ try:
     display["取引コスト"] = display["取引コスト"].map(lambda x: f"{x:,.0f} 円")
     display["会計整合性"] = display["会計整合性"].map(lambda x: "OK" if x else "要確認")
 
-    st.subheader("50% と 55% の全期間比較")
+    st.subheader("5条件の全期間比較")
     st.dataframe(display, use_container_width=True, hide_index=True)
-
-    p50=safe_float(metrics50.get("total_profit"),0); p55=safe_float(metrics55.get("total_profit"),0)
-    n50=int(safe_float(metrics50.get("trade_count",metrics50.get("trades",0)),0))
-    n55=int(safe_float(metrics55.get("trade_count",metrics55.get("trades",0)),0))
-    c50=safe_float(metrics50.get("total_trading_cost"),0); c55=safe_float(metrics55.get("total_trading_cost"),0)
-    cols=st.columns(3)
-    with cols[0]: st.metric("50%にした時の総利益差",f"{p50-p55:+,.0f} 円")
-    with cols[1]: st.metric("取引回数の差",f"{n50-n55:+d} 回")
-    with cols[2]: st.metric("取引コストの差",f"{c50-c55:+,.0f} 円")
-
     st.caption(
-        "これは過去データを使った研究比較です。"
-        "結果だけで50%へ変更するものではありません。"
+        "利益だけでなく、取引回数・PF・最大DD・取引コストも一緒に確認します。"
+        "この表だけで最適なしきい値を決定するものではありません。"
     )
 
-    def half_table(trades,label):
-        if trades is None or not isinstance(trades,pd.DataFrame) or trades.empty:
-            return pd.DataFrame()
-        date_col=next((c for c in ["Exit_Date","exit_date","Sell_Date","sell_date","Date","date"] if c in trades.columns),None)
-        profit_col=next((c for c in ["Net_Profit","net_profit","Profit","profit","PnL","pnl"] if c in trades.columns),None)
-        if date_col is None or profit_col is None: return pd.DataFrame()
-        w=trades.copy()
-        w[date_col]=pd.to_datetime(w[date_col],errors="coerce")
-        w[profit_col]=pd.to_numeric(w[profit_col],errors="coerce")
-        w=w.dropna(subset=[date_col,profit_col]).sort_values(date_col).reset_index(drop=True)
-        if len(w)<2:return pd.DataFrame()
-        cut=len(w)//2; rows=[]
-        for period,part in [("前半",w.iloc[:cut]),("後半",w.iloc[cut:])]:
-            if part.empty: continue
-            profits=part[profit_col]; count=len(part)
-            rows.append({"条件":label,"期間":period,"取引回数":count,
-                         "勝率":float((profits>0).sum()/count),
-                         "純損益合計":float(profits.sum()),"平均損益":float(profits.mean())})
-        return pd.DataFrame(rows)
+    # --------------------------------------------------------
+    # 全条件で共通の日付境界を作る
+    # walk_results の予測期間そのものを前半/後半に二分します。
+    # 取引件数では分けないため、全条件が同じ期間になります。
+    # --------------------------------------------------------
+    common_dates = None
+    if isinstance(walk_results, pd.DataFrame) and not walk_results.empty:
+        if isinstance(walk_results.index, pd.DatetimeIndex):
+            common_dates = pd.Series(walk_results.index)
+        elif "Date" in walk_results.columns:
+            common_dates = pd.to_datetime(walk_results["Date"], errors="coerce")
+    if common_dates is not None:
+        common_dates = pd.Series(pd.to_datetime(common_dates, errors="coerce")).dropna().sort_values().reset_index(drop=True)
 
-    halves=[x for x in [half_table(trades50,"実験 50%"),half_table(trades55,"現行 55%")] if not x.empty]
-    st.subheader("前半・後半の簡易比較")
-    if halves:
-        hd=pd.concat(halves,ignore_index=True); show=hd.copy()
-        show["勝率"]=show["勝率"].map(lambda x:f"{x*100:.1f}%")
-        show["純損益合計"]=show["純損益合計"].map(lambda x:f"{x:+,.0f} 円")
-        show["平均損益"]=show["平均損益"].map(lambda x:f"{x:+,.0f} 円")
-        st.dataframe(show,use_container_width=True,hide_index=True)
-        st.caption("約定した取引を時間順に半分へ分けた簡易チェックです。")
+    st.subheader("同じ日付で分けた前半・後半比較")
+    if common_dates is not None and len(common_dates) >= 2:
+        boundary_position = max(0, (len(common_dates) // 2) - 1)
+        boundary_date = pd.Timestamp(common_dates.iloc[boundary_position])
+        half_tables = []
+        for threshold in EXPERIMENT_THRESHOLDS:
+            trades_x = experiment_results[threshold][0]
+            label = "現行 55%" if abs(threshold - CURRENT_THRESHOLD) < 1e-12 else f"実験 {threshold*100:g}%"
+            table = common_period_half_summary(trades_x, label, boundary_date)
+            if not table.empty:
+                half_tables.append(table)
+        if half_tables:
+            half_comparison = pd.concat(half_tables, ignore_index=True)
+            half_display = half_comparison.copy()
+            half_display["勝率"] = half_display["勝率"].map(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "N/A")
+            half_display["純損益合計"] = half_display["純損益合計"].map(lambda x: f"{x:+,.0f} 円")
+            half_display["平均損益"] = half_display["平均損益"].map(lambda x: f"{x:+,.0f} 円" if pd.notna(x) else "N/A")
+            st.write(f"共通の前半終了日：**{boundary_date.strftime('%Y-%m-%d')}**")
+            st.dataframe(half_display, use_container_width=True, hide_index=True)
+            st.caption(
+                "v4.4では全条件を同じ日付で前半・後半に分けています。"
+                "そのため50%と60%でも比較期間がずれません。"
+            )
+        else:
+            st.info("取引明細の日付または損益列を確認できず、前半・後半比較を表示できませんでした。")
     else:
-        st.info("取引明細の列名が異なるため前半・後半表は省略しました。全期間比較には影響ありません。")
+        st.info("共通の期間境界を作れなかったため、前半・後半比較を表示できませんでした。")
 
     st.subheader("📋 ⑭ コピー用結果")
-    st.code("【⑭ BUY確率しきい値比較実験】\n"
-            f"AIターゲット: {target_horizon}日\n現行ルール: 55%（変更なし）\n\n"
-            + display.to_csv(index=False), language=None)
-    st.download_button("📄 ⑭ 比較結果CSV",data=dataframe_to_csv_bytes(comparison),
-                       file_name=f"advantest_threshold_comparison_{target_horizon}day.csv",
-                       mime="text/csv",use_container_width=True)
-    st.success("⑭ 比較実験完了。⑬の現行55%条件は変更していません。")
+    copy_text_14 = (
+        "【⑭ BUY確率しきい値比較実験 v4.4】\n"
+        f"AIターゲット: {target_horizon}日\n"
+        "現行ルール: 55%（変更なし）\n\n"
+        "■ 全期間比較\n" + display.to_csv(index=False)
+    )
+    if 'half_display' in locals() and isinstance(half_display, pd.DataFrame):
+        copy_text_14 += "\n■ 同じ日付で分けた前半・後半比較\n" + half_display.to_csv(index=False)
+    st.code(copy_text_14, language=None)
+
+    st.download_button(
+        "📄 ⑭ 5条件比較CSV",
+        data=dataframe_to_csv_bytes(comparison),
+        file_name=f"advantest_threshold_comparison_v4_4_{target_horizon}day.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    st.success("⑭ v4.4比較実験完了。⑬の現行55%条件は変更していません。")
+
 except Exception as error:
-    st.error("⑭ 比較実験でエラーが発生しました。⑬の結果には影響ありません。")
+    st.error("⑭ v4.4比較実験でエラーが発生しました。⑬の結果には影響ありません。")
     st.exception(error)
 
