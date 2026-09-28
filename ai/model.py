@@ -1,53 +1,42 @@
 # ============================================================
 # ai/model.py
 #
-# StockPredictionModel v2
+# StockPredictionModel v2.1
 #
-# 1日・3日・5日ターゲット対応
+# ・1 / 3 / 5日ターゲット統一
+# ・翌営業日始値エントリー基準
+# ・80 / 20 時系列分割
+# ・Train/Test境界 Purge
+# ・未来情報混入対策
+# ・学習期間 / Test期間監査
+# ・main.py v4 互換
 #
-# ------------------------------------------------------------
-# シグナル日 = t
+# ============================================================
 #
-# 実際の売買ルールに合わせて
+# Signal:
+#   t 日終値時点
 #
-# BUY価格:
-#     Open(t + 1)
+# Entry:
+#   Open(t + 1)
 #
-# 評価価格:
-#     Close(t + horizon)
+# Evaluation:
+#   Close(t + target_horizon)
 #
-# horizon:
-#     1 / 3 / 5 営業日
+# Future_Return:
+#   Close(t + target_horizon)
+#   / Open(t + 1)
+#   - 1
 #
-# 例:
+# Target:
+#   Future_Return > target_return_threshold
 #
-# horizon = 3
-#
-# t日の終値でAI判断
-# ↓
-# t+1日の始値でBUY
-# ↓
-# t+3日の終値で評価
-#
-# Target = 1
-#   future_return > target_return_threshold
-#
-# Target = 0
-#   それ以外
-#
-# ------------------------------------------------------------
-# 重要:
-# 将来価格はTarget作成だけに使用。
-# AI特徴量には入れない。
 # ============================================================
 
 
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import (
-    RandomForestClassifier,
-)
+from sklearn.ensemble import RandomForestClassifier
 
 from sklearn.metrics import (
     accuracy_score,
@@ -58,13 +47,18 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-from ai.features import (
-    get_ai_feature_columns,
-)
+from ai.features import get_ai_feature_columns
 
 
 # ============================================================
-# 対応ターゲット
+# Version
+# ============================================================
+
+MODEL_VERSION = "v2.1"
+
+
+# ============================================================
+# Supported target horizons
 # ============================================================
 
 SUPPORTED_HORIZONS = (
@@ -82,59 +76,107 @@ class StockPredictionModel:
 
     def __init__(
         self,
+
+        # ----------------------------------------------------
+        # Target
+        # ----------------------------------------------------
         target_horizon=3,
+
         target_return_threshold=0.0,
 
+        # ----------------------------------------------------
+        # Train/Test
+        # ----------------------------------------------------
+        train_ratio=0.80,
+
+        # ----------------------------------------------------
+        # Prediction
+        # ----------------------------------------------------
+        prediction_threshold=0.50,
+
+        # ----------------------------------------------------
+        # RandomForest
+        # ----------------------------------------------------
         n_estimators=500,
+
         max_depth=8,
+
         min_samples_split=10,
+
         min_samples_leaf=5,
+
         max_features="sqrt",
 
         random_state=42,
+
+        class_weight="balanced",
+
+        n_jobs=-1,
     ):
 
         # ====================================================
-        # ターゲット設定
+        # Target
         # ====================================================
 
-        target_horizon = int(
+        self.target_horizon = int(
             target_horizon
         )
 
+        self.target_return_threshold = float(
+            target_return_threshold
+        )
+
+
         if (
-            target_horizon
+            self.target_horizon
             not in SUPPORTED_HORIZONS
         ):
 
             raise ValueError(
                 "target_horizon は "
-                "1, 3, 5 のいずれかを"
-                "指定してください。"
+                "1、3、5 のいずれかを指定してください。"
             )
 
-        self.target_horizon = (
-            target_horizon
+
+        # ====================================================
+        # Train/Test
+        # ====================================================
+
+        self.train_ratio = float(
+            train_ratio
         )
 
-        self.target_return_threshold = (
-            float(
-                target_return_threshold
+
+        if not (
+            0.50
+            <= self.train_ratio
+            < 1.0
+        ):
+
+            raise ValueError(
+                "train_ratio は "
+                "0.50以上1.0未満にしてください。"
             )
+
+
+        # ====================================================
+        # Prediction
+        # ====================================================
+
+        self.prediction_threshold = float(
+            prediction_threshold
         )
 
 
         # ====================================================
-        # RandomForest設定
+        # RandomForest
         # ====================================================
 
         self.n_estimators = int(
             n_estimators
         )
 
-        self.max_depth = int(
-            max_depth
-        )
+        self.max_depth = max_depth
 
         self.min_samples_split = int(
             min_samples_split
@@ -144,45 +186,48 @@ class StockPredictionModel:
             min_samples_leaf
         )
 
-        self.max_features = (
-            max_features
-        )
+        self.max_features = max_features
 
         self.random_state = int(
             random_state
         )
 
+        self.class_weight = class_weight
 
-        # ====================================================
-        # モデル
-        # ====================================================
-
-        self.model = (
-            self._create_model()
+        self.n_jobs = int(
+            n_jobs
         )
 
 
         # ====================================================
-        # 学習状態
+        # Runtime
         # ====================================================
+
+        self.model = None
 
         self.feature_columns = []
 
-        self.is_trained = False
-
         self.metrics = {}
+
+        self.feature_importance = (
+            pd.DataFrame()
+        )
 
         self.test_results = (
             pd.DataFrame()
         )
 
-        self.training_data = (
+        self.training_log = (
+            pd.DataFrame()
+        )
+
+        self.prepared_data = (
             pd.DataFrame()
         )
 
 
     # ========================================================
-    # モデル作成
+    # Create model
     # ========================================================
 
     def _create_model(
@@ -210,133 +255,268 @@ class StockPredictionModel:
                 self.random_state,
 
             class_weight=
-                "balanced",
+                self.class_weight,
 
-            n_jobs=-1,
+            n_jobs=
+                self.n_jobs,
         )
 
 
     # ========================================================
-    # 安全な数値化
+    # Normalize dataframe
     # ========================================================
 
     @staticmethod
-    def _numeric_series(
-        series,
-    ):
-
-        return pd.to_numeric(
-            series,
-            errors="coerce",
-        )
-
-
-    # ========================================================
-    # Target作成
-    #
-    # signal day = t
-    #
-    # Entry_Open
-    #   = Open(t+1)
-    #
-    # Future_Close
-    #   = Close(t+horizon)
-    #
-    # Future_Return
-    #   = Future_Close / Entry_Open - 1
-    # ========================================================
-
-    def create_target(
-        self,
+    def _normalize_dataframe(
         data,
     ):
 
         if data is None:
-            raise ValueError(
-                "data がありません。"
-            )
 
-        if data.empty:
-            raise ValueError(
-                "data が空です。"
-            )
-
-        if "Open" not in data.columns:
-            raise ValueError(
-                "Open 列がありません。"
-            )
-
-        if "Close" not in data.columns:
-            raise ValueError(
-                "Close 列がありません。"
-            )
+            return pd.DataFrame()
 
 
         result = data.copy()
 
 
+        if result.empty:
+
+            return result
+
+
+        result.index = pd.to_datetime(
+            result.index
+        )
+
+
+        if getattr(
+            result.index,
+            "tz",
+            None,
+        ) is not None:
+
+            result.index = (
+                result.index
+                .tz_localize(None)
+            )
+
+
+        result = result[
+            ~result.index.duplicated(
+                keep="last"
+            )
+        ]
+
+
+        result = result.sort_index()
+
+
+        return result
+
+
+    # ========================================================
+    # Feature columns
+    # ========================================================
+
+    def _get_feature_columns(
+        self,
+        data,
+    ):
+
+        try:
+
+            requested_columns = (
+                get_ai_feature_columns()
+            )
+
+        except Exception:
+
+            requested_columns = []
+
+
+        feature_columns = [
+
+            column
+
+            for column
+            in requested_columns
+
+            if column in data.columns
+        ]
+
+
         # ====================================================
-        # 数値化
+        # Fallback
         # ====================================================
 
-        open_price = (
-            self._numeric_series(
-                result["Open"]
+        if not feature_columns:
+
+            excluded_columns = {
+
+                "Target",
+
+                "Future_Return",
+
+                "Entry_Open",
+
+                "Future_Close",
+            }
+
+
+            feature_columns = [
+
+                column
+
+                for column
+                in data.columns
+
+                if (
+                    column
+                    not in excluded_columns
+
+                    and
+
+                    pd.api.types.is_numeric_dtype(
+                        data[column]
+                    )
+                )
+            ]
+
+
+        if not feature_columns:
+
+            raise ValueError(
+                "AI学習に使用できる特徴量がありません。"
+            )
+
+
+        return feature_columns
+
+
+    # ========================================================
+    # Create target
+    # ========================================================
+
+    def create_target(
+        self,
+        ai_data,
+    ):
+
+        data = (
+            self._normalize_dataframe(
+                ai_data
             )
         )
 
-        close_price = (
-            self._numeric_series(
-                result["Close"]
+
+        if data.empty:
+
+            raise ValueError(
+                "ai_data が空です。"
             )
+
+
+        required_columns = [
+            "Open",
+            "Close",
+        ]
+
+
+        missing_columns = [
+
+            column
+
+            for column
+            in required_columns
+
+            if column not in data.columns
+        ]
+
+
+        if missing_columns:
+
+            raise ValueError(
+
+                "ai_data に必要な列がありません: "
+
+                + ", ".join(
+                    missing_columns
+                )
+            )
+
+
+        # ====================================================
+        # Numeric
+        # ====================================================
+
+        data[
+            "Open"
+        ] = pd.to_numeric(
+            data[
+                "Open"
+            ],
+            errors="coerce",
+        )
+
+
+        data[
+            "Close"
+        ] = pd.to_numeric(
+            data[
+                "Close"
+            ],
+            errors="coerce",
         )
 
 
         # ====================================================
-        # 翌営業日始値
+        # Entry
         # ====================================================
 
-        result[
-            "Target_Entry_Open"
-        ] = open_price.shift(-1)
-
-
-        # ====================================================
-        # horizon営業日後の終値
-        #
-        # horizon=1:
-        #   t+1 Close
-        #
-        # horizon=3:
-        #   t+3 Close
-        #
-        # horizon=5:
-        #   t+5 Close
-        # ====================================================
-
-        result[
-            "Target_Future_Close"
-        ] = close_price.shift(
-            -self.target_horizon
-        )
-
-
-        # ====================================================
-        # 将来リターン
-        # ====================================================
-
-        result[
-            "Target_Future_Return"
+        data[
+            "Entry_Open"
         ] = (
 
-            result[
-                "Target_Future_Close"
+            data[
+                "Open"
+            ]
+            .shift(-1)
+        )
+
+
+        # ====================================================
+        # Evaluation price
+        # ====================================================
+
+        data[
+            "Future_Close"
+        ] = (
+
+            data[
+                "Close"
+            ]
+            .shift(
+                -self.target_horizon
+            )
+        )
+
+
+        # ====================================================
+        # Future return
+        # ====================================================
+
+        data[
+            "Future_Return"
+        ] = (
+
+            data[
+                "Future_Close"
             ]
 
             /
 
-            result[
-                "Target_Entry_Open"
+            data[
+                "Entry_Open"
             ]
 
             - 1.0
@@ -346,59 +526,54 @@ class StockPredictionModel:
         # ====================================================
         # Target
         #
-        # Future_Return >
-        # target_return_threshold
-        #
-        # なら1
+        # 末尾のFuture_Return=NaNを
+        # 0クラスとして扱わない
         # ====================================================
 
-        valid_target = (
+        target = pd.Series(
 
-            result[
-                "Target_Entry_Open"
-            ].notna()
+            np.nan,
 
-            &
+            index=data.index,
 
-            result[
-                "Target_Future_Close"
-            ].notna()
-
-            &
-
-            result[
-                "Target_Future_Return"
-            ].notna()
+            dtype="float64",
         )
 
 
-        result[
-            "Target"
-        ] = np.nan
+        valid_target = (
+
+            data[
+                "Future_Return"
+            ]
+            .notna()
+        )
 
 
-        result.loc[
-            valid_target,
-            "Target",
+        target.loc[
+            valid_target
         ] = (
 
-            result.loc[
+            data.loc[
                 valid_target,
-                "Target_Future_Return",
+                "Future_Return",
             ]
 
             >
 
             self.target_return_threshold
-
         ).astype(int)
 
 
-        return result
+        data[
+            "Target"
+        ] = target
+
+
+        return data
 
 
     # ========================================================
-    # 学習データ準備
+    # Prepare training data
     # ========================================================
 
     def prepare_training_data(
@@ -406,149 +581,337 @@ class StockPredictionModel:
         ai_data,
     ):
 
-        if (
-            ai_data is None
-            or ai_data.empty
-        ):
-
-            raise ValueError(
-                "AI学習データがありません。"
+        data = (
+            self.create_target(
+                ai_data
             )
-
-
-        # ====================================================
-        # Target追加
-        # ====================================================
-
-        data = self.create_target(
-            ai_data
         )
 
 
         # ====================================================
-        # 特徴量一覧
+        # Feature list
         # ====================================================
-
-        requested_features = (
-            get_ai_feature_columns()
-        )
-
-
-        available_features = [
-
-            column
-
-            for column
-            in requested_features
-
-            if column in data.columns
-        ]
-
-
-        if not available_features:
-
-            raise ValueError(
-                "AI特徴量が見つかりません。"
-            )
-
 
         self.feature_columns = (
-            available_features
+            self._get_feature_columns(
+                data
+            )
         )
 
 
         # ====================================================
-        # 数値化
+        # Numeric features
         # ====================================================
 
         for column in self.feature_columns:
 
-            data[column] = (
-                pd.to_numeric(
-                    data[column],
-                    errors="coerce",
-                )
+            data[
+                column
+            ] = pd.to_numeric(
+                data[
+                    column
+                ],
+                errors="coerce",
             )
 
 
         # ====================================================
-        # 学習に必要な列
+        # inf -> NaN
         # ====================================================
+
+        data.replace(
+            [
+                np.inf,
+                -np.inf,
+            ],
+            np.nan,
+            inplace=True,
+        )
+
 
         required_columns = (
 
             self.feature_columns
 
             + [
+                "Entry_Open",
+                "Future_Close",
+                "Future_Return",
                 "Target",
-                "Target_Entry_Open",
-                "Target_Future_Close",
-                "Target_Future_Return",
             ]
         )
 
 
-        training_data = (
-            data[
-                required_columns
-            ]
-            .replace(
-                [
-                    np.inf,
-                    -np.inf,
-                ],
-                np.nan,
+        prepared = (
+
+            data
+            .dropna(
+                subset=
+                    required_columns
             )
-            .dropna()
             .copy()
         )
 
 
-        training_data[
-            "Target"
-        ] = training_data[
-            "Target"
-        ].astype(int)
-
-
-        # ====================================================
-        # 最低データ数
-        # ====================================================
-
-        if len(
-            training_data
-        ) < 100:
+        if prepared.empty:
 
             raise ValueError(
-                "AI学習に使用できる"
-                "データが100件未満です。"
+                "AI学習用データを作成できませんでした。"
             )
 
 
-        self.training_data = (
-            training_data.copy()
+        prepared[
+            "Target"
+        ] = (
+
+            prepared[
+                "Target"
+            ]
+            .astype(int)
         )
 
 
-        X = training_data[
-            self.feature_columns
-        ].copy()
+        self.prepared_data = (
+            prepared.copy()
+        )
 
 
-        y = training_data[
-            "Target"
-        ].copy()
+        return prepared
+
+
+    # ========================================================
+    # Purged chronological split
+    # ========================================================
+
+    def _purged_train_test_split(
+        self,
+        data,
+    ):
+
+        total_rows = len(
+            data
+        )
+
+
+        if total_rows < 100:
+
+            raise ValueError(
+                "AI学習用データが少なすぎます。"
+            )
+
+
+        # ====================================================
+        # Raw 80/20 boundary
+        # ====================================================
+
+        split_position = int(
+            total_rows
+            * self.train_ratio
+        )
+
+
+        if split_position <= 0:
+
+            raise ValueError(
+                "学習データを作成できません。"
+            )
+
+
+        if split_position >= total_rows:
+
+            raise ValueError(
+                "テストデータを作成できません。"
+            )
+
+
+        # ====================================================
+        # PURGE
+        #
+        # 例:
+        # target_horizon = 5
+        #
+        # Train末尾の5シグナルは
+        # その正解ラベルの評価日が
+        # Test側へ入り込む可能性があるため
+        # 学習から除外する
+        # ====================================================
+
+        purged_train_end = (
+
+            split_position
+
+            - self.target_horizon
+        )
+
+
+        if purged_train_end <= 0:
+
+            raise ValueError(
+                "Purge後の学習データが不足しています。"
+            )
+
+
+        # ====================================================
+        # Train
+        # ====================================================
+
+        train_data = (
+
+            data.iloc[
+                :purged_train_end
+            ]
+            .copy()
+        )
+
+
+        # ====================================================
+        # Purged rows
+        # ====================================================
+
+        purge_data = (
+
+            data.iloc[
+                purged_train_end:
+                split_position
+            ]
+            .copy()
+        )
+
+
+        # ====================================================
+        # Test
+        #
+        # Test開始位置は元の80%境界を維持
+        # ====================================================
+
+        test_data = (
+
+            data.iloc[
+                split_position:
+            ]
+            .copy()
+        )
+
+
+        if train_data.empty:
+
+            raise ValueError(
+                "Purge後のTrainデータが空です。"
+            )
+
+
+        if test_data.empty:
+
+            raise ValueError(
+                "Testデータが空です。"
+            )
+
+
+        # ====================================================
+        # Audit
+        # ====================================================
+
+        audit_record = {
+
+            "Model_Version":
+                MODEL_VERSION,
+
+            "Target_Horizon":
+                int(
+                    self.target_horizon
+                ),
+
+            "Target_Return_Threshold":
+                float(
+                    self.target_return_threshold
+                ),
+
+            "Train_Ratio":
+                float(
+                    self.train_ratio
+                ),
+
+            "Total_Rows":
+                int(
+                    total_rows
+                ),
+
+            "Raw_Split_Position":
+                int(
+                    split_position
+                ),
+
+            "Purge_Rows":
+                int(
+                    len(
+                        purge_data
+                    )
+                ),
+
+            "Train_Rows":
+                int(
+                    len(
+                        train_data
+                    )
+                ),
+
+            "Test_Rows":
+                int(
+                    len(
+                        test_data
+                    )
+                ),
+
+            "Train_Start":
+                train_data.index[0],
+
+            "Train_End":
+                train_data.index[-1],
+
+            "Purge_Start":
+                (
+                    purge_data.index[0]
+
+                    if not purge_data.empty
+
+                    else pd.NaT
+                ),
+
+            "Purge_End":
+                (
+                    purge_data.index[-1]
+
+                    if not purge_data.empty
+
+                    else pd.NaT
+                ),
+
+            "Test_Start":
+                test_data.index[0],
+
+            "Test_End":
+                test_data.index[-1],
+
+            "Purged":
+                True,
+        }
+
+
+        self.training_log = pd.DataFrame(
+            [
+                audit_record
+            ]
+        )
 
 
         return (
-            X,
-            y,
-            training_data,
+            train_data,
+            test_data,
         )
 
 
     # ========================================================
-    # 学習
+    # Train
     # ========================================================
 
     def train(
@@ -556,75 +919,72 @@ class StockPredictionModel:
         ai_data,
     ):
 
+        data = (
+            self.prepare_training_data(
+                ai_data
+            )
+        )
+
+
+        # ====================================================
+        # Purged 80/20 split
+        # ====================================================
+
         (
-            X,
-            y,
-            training_data,
-        ) = self.prepare_training_data(
-            ai_data
+            train_data,
+            test_data,
+        ) = self._purged_train_test_split(
+            data
+        )
+
+
+        X_train = (
+
+            train_data[
+                self.feature_columns
+            ]
+        )
+
+
+        y_train = (
+
+            train_data[
+                "Target"
+            ]
+            .astype(int)
+        )
+
+
+        X_test = (
+
+            test_data[
+                self.feature_columns
+            ]
+        )
+
+
+        y_test = (
+
+            test_data[
+                "Target"
+            ]
+            .astype(int)
         )
 
 
         # ====================================================
-        # 時系列80 / 20
-        # ====================================================
-
-        split_index = int(
-            len(X)
-            * 0.80
-        )
-
-
-        # ====================================================
-        # 安全チェック
-        # ====================================================
-
-        if split_index <= 0:
-
-            raise ValueError(
-                "学習データが不足しています。"
-            )
-
-
-        if split_index >= len(X):
-
-            raise ValueError(
-                "テストデータを確保できません。"
-            )
-
-
-        X_train = X.iloc[
-            :split_index
-        ].copy()
-
-        X_test = X.iloc[
-            split_index:
-        ].copy()
-
-
-        y_train = y.iloc[
-            :split_index
-        ].copy()
-
-        y_test = y.iloc[
-            split_index:
-        ].copy()
-
-
-        # ====================================================
-        # 学習データに両クラスが必要
+        # Need two classes
         # ====================================================
 
         if y_train.nunique() < 2:
 
             raise ValueError(
-                "学習データのTargetが"
-                "1種類しかありません。"
+                "学習データに0/1の両クラスがありません。"
             )
 
 
         # ====================================================
-        # モデルを毎回新規作成
+        # Fit
         # ====================================================
 
         self.model = (
@@ -639,61 +999,441 @@ class StockPredictionModel:
 
 
         # ====================================================
-        # Prediction
-        # ====================================================
-
-        prediction = (
-            self.model.predict(
-                X_test
-            )
-        )
-
-
-        # ====================================================
         # Probability
         # ====================================================
 
-        probability_up = (
-            self._predict_positive_probability(
+        probabilities = (
+            self._predict_probability_from_model(
                 X_test
             )
         )
 
 
+        predictions = (
+
+            probabilities
+
+            >= self.prediction_threshold
+        ).astype(int)
+
+
         # ====================================================
-        # 指標
+        # Test results
         # ====================================================
 
-        accuracy = (
+        self.test_results = pd.DataFrame(
+
+            {
+
+                "Actual":
+                    y_test.values,
+
+                "Prediction":
+                    predictions,
+
+                "Probability_Up":
+                    probabilities,
+
+                "Probability_Down":
+                    1.0
+                    - probabilities,
+
+                "Entry_Open":
+                    test_data[
+                        "Entry_Open"
+                    ].values,
+
+                "Future_Close":
+                    test_data[
+                        "Future_Close"
+                    ].values,
+
+                "Future_Return":
+                    test_data[
+                        "Future_Return"
+                    ].values,
+
+            },
+
+            index=test_data.index,
+        )
+
+
+        self.test_results[
+            "Correct"
+        ] = (
+
+            self.test_results[
+                "Actual"
+            ]
+
+            ==
+
+            self.test_results[
+                "Prediction"
+            ]
+        )
+
+
+        self.test_results[
+            "Target_Horizon"
+        ] = int(
+            self.target_horizon
+        )
+
+
+        self.test_results[
+            "Target_Return_Threshold"
+        ] = float(
+            self.target_return_threshold
+        )
+
+
+        self.test_results[
+            "Model_Version"
+        ] = MODEL_VERSION
+
+
+        # ====================================================
+        # Metrics
+        # ====================================================
+
+        self.metrics = (
+            self._calculate_metrics(
+                y_test=
+                    y_test,
+
+                predictions=
+                    predictions,
+
+                probabilities=
+                    probabilities,
+
+                test_data=
+                    test_data,
+
+                train_data=
+                    train_data,
+            )
+        )
+
+
+        # ====================================================
+        # Feature importance
+        # ====================================================
+
+        self.feature_importance = pd.DataFrame(
+
+            {
+
+                "Feature":
+                    self.feature_columns,
+
+                "Importance":
+                    self.model
+                    .feature_importances_,
+            }
+        )
+
+
+        self.feature_importance = (
+
+            self.feature_importance
+            .sort_values(
+                "Importance",
+                ascending=False,
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+
+        return dict(
+            self.metrics
+        )
+
+
+    # ========================================================
+    # Internal probability
+    # ========================================================
+
+    def _predict_probability_from_model(
+        self,
+        features,
+    ):
+
+        if self.model is None:
+
+            raise ValueError(
+                "AIモデルがまだ学習されていません。"
+            )
+
+
+        probabilities = (
+            self.model.predict_proba(
+                features
+            )
+        )
+
+
+        classes = list(
+            self.model.classes_
+        )
+
+
+        if 1 in classes:
+
+            class_index = (
+                classes.index(
+                    1
+                )
+            )
+
+
+            return probabilities[
+                :,
+                class_index
+            ]
+
+
+        return np.zeros(
+            len(
+                features
+            ),
+            dtype=float,
+        )
+
+
+    # ========================================================
+    # Predict probability
+    #
+    # main.py v4 compatibility
+    # ========================================================
+
+    def predict_probability(
+        self,
+        ai_data,
+    ):
+
+        if self.model is None:
+
+            raise ValueError(
+                "AIモデルがまだ学習されていません。"
+            )
+
+
+        data = (
+            self._normalize_dataframe(
+                ai_data
+            )
+        )
+
+
+        if data.empty:
+
+            raise ValueError(
+                "予測対象データが空です。"
+            )
+
+
+        missing_features = [
+
+            column
+
+            for column
+            in self.feature_columns
+
+            if column not in data.columns
+        ]
+
+
+        if missing_features:
+
+            raise ValueError(
+
+                "予測に必要な特徴量がありません: "
+
+                + ", ".join(
+                    missing_features
+                )
+            )
+
+
+        # ====================================================
+        # Numeric
+        # ====================================================
+
+        feature_data = (
+
+            data[
+                self.feature_columns
+            ]
+            .copy()
+        )
+
+
+        for column in self.feature_columns:
+
+            feature_data[
+                column
+            ] = pd.to_numeric(
+                feature_data[
+                    column
+                ],
+                errors="coerce",
+            )
+
+
+        feature_data.replace(
+            [
+                np.inf,
+                -np.inf,
+            ],
+            np.nan,
+            inplace=True,
+        )
+
+
+        # ====================================================
+        # 最新の完全な特徴量行を使用
+        # ====================================================
+
+        valid_features = (
+            feature_data
+            .dropna()
+        )
+
+
+        if valid_features.empty:
+
+            raise ValueError(
+                "最新予測に使用できる特徴量がありません。"
+            )
+
+
+        latest_features = (
+
+            valid_features
+            .iloc[
+                [
+                    -1
+                ]
+            ]
+        )
+
+
+        probability = (
+            self._predict_probability_from_model(
+                latest_features
+            )
+        )
+
+
+        return float(
+            probability[
+                0
+            ]
+        )
+
+
+    # ========================================================
+    # Predict
+    # ========================================================
+
+    def predict(
+        self,
+        ai_data,
+    ):
+
+        probability = (
+            self.predict_probability(
+                ai_data
+            )
+        )
+
+
+        return int(
+            probability
+            >= self.prediction_threshold
+        )
+
+
+    # ========================================================
+    # Metrics
+    # ========================================================
+
+    def _calculate_metrics(
+        self,
+        y_test,
+        predictions,
+        probabilities,
+        test_data,
+        train_data,
+    ):
+
+        actual = (
+            pd.Series(
+                y_test
+            )
+            .astype(int)
+        )
+
+
+        predicted = pd.Series(
+
+            predictions,
+
+            index=actual.index,
+
+            dtype=int,
+        )
+
+
+        probability_series = pd.Series(
+
+            probabilities,
+
+            index=actual.index,
+
+            dtype=float,
+        )
+
+
+        # ====================================================
+        # Classification
+        # ====================================================
+
+        accuracy = float(
             accuracy_score(
-                y_test,
-                prediction,
+                actual,
+                predicted,
             )
         )
 
 
-        precision = (
+        precision = float(
             precision_score(
-                y_test,
-                prediction,
+                actual,
+                predicted,
                 zero_division=0,
             )
         )
 
 
-        recall = (
+        recall = float(
             recall_score(
-                y_test,
-                prediction,
+                actual,
+                predicted,
                 zero_division=0,
             )
         )
 
 
-        f1 = (
+        f1 = float(
             f1_score(
-                y_test,
-                prediction,
+                actual,
+                predicted,
                 zero_division=0,
             )
         )
@@ -703,14 +1443,14 @@ class StockPredictionModel:
         # AUC
         # ====================================================
 
-        if y_test.nunique() >= 2:
+        if actual.nunique() >= 2:
 
             try:
 
-                auc = (
+                auc = float(
                     roc_auc_score(
-                        y_test,
-                        probability_up,
+                        actual,
+                        probability_series,
                     )
                 )
 
@@ -724,12 +1464,15 @@ class StockPredictionModel:
 
 
         # ====================================================
-        # Confusion Matrix
+        # Confusion matrix
         # ====================================================
 
         matrix = confusion_matrix(
-            y_test,
-            prediction,
+
+            actual,
+
+            predicted,
+
             labels=[
                 0,
                 1,
@@ -738,136 +1481,192 @@ class StockPredictionModel:
 
 
         tn = int(
-            matrix[0, 0]
+            matrix[
+                0,
+                0
+            ]
         )
 
         fp = int(
-            matrix[0, 1]
+            matrix[
+                0,
+                1
+            ]
         )
 
         fn = int(
-            matrix[1, 0]
+            matrix[
+                1,
+                0
+            ]
         )
 
         tp = int(
-            matrix[1, 1]
-        )
-
-
-        # ====================================================
-        # Test Results
-        # ====================================================
-
-        test_source = (
-            training_data.iloc[
-                split_index:
+            matrix[
+                1,
+                1
             ]
         )
 
 
-        self.test_results = pd.DataFrame(
+        # ====================================================
+        # Future return
+        # ====================================================
 
-            {
-                "Actual":
-                    y_test.values,
+        future_return = pd.to_numeric(
 
-                "Prediction":
-                    prediction,
+            test_data[
+                "Future_Return"
+            ],
 
-                "Probability_Up":
-                    probability_up,
-
-                "Entry_Open":
-                    test_source[
-                        "Target_Entry_Open"
-                    ].values,
-
-                "Future_Close":
-                    test_source[
-                        "Target_Future_Close"
-                    ].values,
-
-                "Future_Return":
-                    test_source[
-                        "Target_Future_Return"
-                    ].values,
-            },
-
-            index=X_test.index,
+            errors="coerce",
         )
+
+
+        predicted_up_mask = (
+
+            predicted.values == 1
+        )
+
+
+        predicted_down_mask = (
+
+            predicted.values == 0
+        )
+
+
+        predicted_up_returns = (
+
+            future_return.iloc[
+                np.where(
+                    predicted_up_mask
+                )[0]
+            ]
+        )
+
+
+        predicted_down_returns = (
+
+            future_return.iloc[
+                np.where(
+                    predicted_down_mask
+                )[0]
+            ]
+        )
+
+
+        # ====================================================
+        # Audit information
+        # ====================================================
+
+        audit = {}
+
+
+        if not self.training_log.empty:
+
+            audit = (
+                self.training_log
+                .iloc[
+                    0
+                ]
+                .to_dict()
+            )
 
 
         # ====================================================
         # Metrics
         # ====================================================
 
-        self.metrics = {
+        return {
 
-            "accuracy":
-                float(
-                    accuracy
+            # ------------------------------------------------
+            # Version
+            # ------------------------------------------------
+
+            "model_version":
+                MODEL_VERSION,
+
+            # ------------------------------------------------
+            # Target
+            # ------------------------------------------------
+
+            "target_horizon":
+                int(
+                    self.target_horizon
                 ),
 
-            "precision":
+            "target_return_threshold":
                 float(
-                    precision
+                    self.target_return_threshold
                 ),
 
-            "recall":
-                float(
-                    recall
-                ),
-
-            "f1":
-                float(
-                    f1
-                ),
-
-            "auc":
+            "target_definition":
                 (
-                    float(auc)
-                    if auc is not None
-                    else None
+                    "Close(t+horizon) / "
+                    "Open(t+1) - 1"
                 ),
 
-            "train_samples":
+            # ------------------------------------------------
+            # Split
+            # ------------------------------------------------
+
+            "train_ratio":
+                float(
+                    self.train_ratio
+                ),
+
+            "purged":
+                True,
+
+            "purge_days":
                 int(
-                    len(X_train)
+                    self.target_horizon
                 ),
 
-            "test_samples":
-                int(
-                    len(X_test)
-                ),
-
-            "total_samples":
-                int(
-                    len(X)
-                ),
-
-            "feature_count":
+            "train_rows":
                 int(
                     len(
-                        self.feature_columns
+                        train_data
                     )
                 ),
 
-            "train_up_rate":
-                float(
-                    y_train.mean()
-                ),
-
-            "test_up_rate":
-                float(
-                    y_test.mean()
-                ),
-
-            "predicted_up_rate":
-                float(
-                    np.mean(
-                        prediction
+            "test_rows":
+                int(
+                    len(
+                        test_data
                     )
                 ),
+
+            "purge_rows":
+                int(
+                    audit.get(
+                        "Purge_Rows",
+                        self.target_horizon,
+                    )
+                ),
+
+            # ------------------------------------------------
+            # Classification
+            # ------------------------------------------------
+
+            "accuracy":
+                accuracy,
+
+            "precision":
+                precision,
+
+            "recall":
+                recall,
+
+            "f1":
+                f1,
+
+            "auc":
+                auc,
+
+            # ------------------------------------------------
+            # Confusion
+            # ------------------------------------------------
 
             "true_negative":
                 tn,
@@ -881,344 +1680,98 @@ class StockPredictionModel:
             "true_positive":
                 tp,
 
-            # ================================================
-            # v2 Target情報
-            # ================================================
+            # ------------------------------------------------
+            # Counts
+            # ------------------------------------------------
 
-            "target_horizon":
+            "actual_up_count":
                 int(
-                    self.target_horizon
+                    (
+                        actual == 1
+                    ).sum()
                 ),
 
-            "target_return_threshold":
-                float(
-                    self.target_return_threshold
+            "actual_down_count":
+                int(
+                    (
+                        actual == 0
+                    ).sum()
                 ),
 
-            "target_definition":
-                (
-                    "Close(t+"
-                    + str(
-                        self.target_horizon
-                    )
-                    + ") / Open(t+1) - 1"
+            "predicted_up_count":
+                int(
+                    (
+                        predicted == 1
+                    ).sum()
                 ),
+
+            "predicted_down_count":
+                int(
+                    (
+                        predicted == 0
+                    ).sum()
+                ),
+
+            # ------------------------------------------------
+            # Return
+            # ------------------------------------------------
 
             "average_future_return":
-                float(
-                    test_source[
-                        "Target_Future_Return"
-                    ].mean()
-                ),
-
-            "median_future_return":
-                float(
-                    test_source[
-                        "Target_Future_Return"
-                    ].median()
-                ),
-        }
-
-
-        self.is_trained = True
-
-
-        return dict(
-            self.metrics
-        )
-
-
-    # ========================================================
-    # Positive class probability
-    #
-    # predict_proba[:, 1] を固定で使わず
-    # classes_から「1」の位置を取得する
-    # ========================================================
-
-    def _predict_positive_probability(
-        self,
-        X,
-    ):
-
-        probabilities = (
-            self.model.predict_proba(
-                X
-            )
-        )
-
-
-        classes = list(
-            self.model.classes_
-        )
-
-
-        if 1 not in classes:
-
-            return np.zeros(
-                len(X),
-                dtype=float,
-            )
-
-
-        positive_index = (
-            classes.index(1)
-        )
-
-
-        return probabilities[
-            :,
-            positive_index
-        ]
-
-
-    # ========================================================
-    # 最新特徴量行
-    # ========================================================
-
-    def _get_latest_feature_row(
-        self,
-        ai_data,
-    ):
-
-        if not self.is_trained:
-
-            raise RuntimeError(
-                "AIモデルがまだ"
-                "学習されていません。"
-            )
-
-
-        if (
-            ai_data is None
-            or ai_data.empty
-        ):
-
-            raise ValueError(
-                "AIデータがありません。"
-            )
-
-
-        missing = [
-
-            column
-
-            for column
-            in self.feature_columns
-
-            if column
-            not in ai_data.columns
-        ]
-
-
-        if missing:
-
-            raise ValueError(
-                "最新予測に必要な特徴量が"
-                "不足しています: "
-                + ", ".join(
-                    missing
-                )
-            )
-
-
-        features = (
-            ai_data[
-                self.feature_columns
-            ]
-            .copy()
-        )
-
-
-        for column in self.feature_columns:
-
-            features[column] = (
-                pd.to_numeric(
-                    features[column],
-                    errors="coerce",
-                )
-            )
-
-
-        features = (
-            features
-            .replace(
-                [
-                    np.inf,
-                    -np.inf,
-                ],
-                np.nan,
-            )
-            .dropna()
-        )
-
-
-        if features.empty:
-
-            raise ValueError(
-                "最新予測に使用できる"
-                "特徴量データがありません。"
-            )
-
-
-        return features.iloc[
-            [-1]
-        ]
-
-
-    # ========================================================
-    # 最新上昇確率
-    # ========================================================
-
-    def predict_probability(
-        self,
-        ai_data,
-    ):
-
-        latest_X = (
-            self._get_latest_feature_row(
-                ai_data
-            )
-        )
-
-
-        probability = (
-            self._predict_positive_probability(
-                latest_X
-            )[0]
-        )
-
-
-        return float(
-            probability
-        )
-
-
-    # ========================================================
-    # 最新予測
-    # ========================================================
-
-    def predict(
-        self,
-        ai_data,
-        threshold=0.50,
-    ):
-
-        probability_up = (
-            self.predict_probability(
-                ai_data
-            )
-        )
-
-
-        prediction = int(
-            probability_up
-            >= float(
-                threshold
-            )
-        )
-
-
-        return {
-
-            "prediction":
-                prediction,
-
-            "probability_up":
-                probability_up,
-
-            "probability_down":
                 (
-                    1.0
-                    - probability_up
-                ),
-
-            "threshold":
-                float(
-                    threshold
-                ),
-
-            "target_horizon":
-                int(
-                    self.target_horizon
-                ),
-
-            "target_return_threshold":
-                float(
-                    self.target_return_threshold
-                ),
-
-            "target_definition":
-                (
-                    "翌営業日始値から"
-                    + str(
-                        self.target_horizon
+                    float(
+                        future_return.mean()
                     )
-                    + "営業日後終値まで"
+
+                    if future_return.notna().any()
+
+                    else None
+                ),
+
+            "average_return_predicted_up":
+                (
+                    float(
+                        predicted_up_returns.mean()
+                    )
+
+                    if (
+                        predicted_up_returns
+                        .notna()
+                        .any()
+                    )
+
+                    else None
+                ),
+
+            "average_return_predicted_down":
+                (
+                    float(
+                        predicted_down_returns.mean()
+                    )
+
+                    if (
+                        predicted_down_returns
+                        .notna()
+                        .any()
+                    )
+
+                    else None
                 ),
         }
 
 
     # ========================================================
-    # Feature Importance
+    # Feature importance
     # ========================================================
 
     def get_feature_importance(
         self,
     ):
 
-        if not self.is_trained:
-
-            return pd.DataFrame(
-                columns=[
-                    "Feature",
-                    "Importance",
-                ]
-            )
-
-
-        if not hasattr(
-            self.model,
-            "feature_importances_",
-        ):
-
-            return pd.DataFrame(
-                columns=[
-                    "Feature",
-                    "Importance",
-                ]
-            )
-
-
-        importance = pd.DataFrame(
-
-            {
-                "Feature":
-                    self.feature_columns,
-
-                "Importance":
-                    self.model
-                    .feature_importances_,
-            }
-        )
-
-
-        importance = (
-            importance
-            .sort_values(
-                "Importance",
-                ascending=False,
-            )
-            .reset_index(
-                drop=True
-            )
-        )
-
-
-        return importance
+        return self.feature_importance.copy()
 
 
     # ========================================================
-    # Test Results
+    # Test results
     # ========================================================
 
     def get_test_results(
@@ -1226,6 +1779,17 @@ class StockPredictionModel:
     ):
 
         return self.test_results.copy()
+
+
+    # ========================================================
+    # Training audit
+    # ========================================================
+
+    def get_training_log(
+        self,
+    ):
+
+        return self.training_log.copy()
 
 
     # ========================================================
@@ -1242,7 +1806,7 @@ class StockPredictionModel:
 
 
     # ========================================================
-    # Target情報
+    # Target info
     # ========================================================
 
     def get_target_info(
@@ -1252,41 +1816,56 @@ class StockPredictionModel:
         return {
 
             "target_horizon":
-                self.target_horizon,
+                int(
+                    self.target_horizon
+                ),
 
             "target_return_threshold":
-                self.target_return_threshold,
+                float(
+                    self.target_return_threshold
+                ),
+
+            "entry_price":
+                "Open(t+1)",
+
+            "evaluation_price":
+                (
+                    f"Close(t+"
+                    f"{self.target_horizon})"
+                ),
+
+            "target_definition":
+                (
+                    "Future_Return > "
+                    "target_return_threshold"
+                ),
+
+            "future_return_definition":
+                (
+                    "Close(t+horizon) / "
+                    "Open(t+1) - 1"
+                ),
 
             "supported_horizons":
                 list(
                     SUPPORTED_HORIZONS
                 ),
 
-            "entry":
-                "Open(t+1)",
+            "model_version":
+                MODEL_VERSION,
 
-            "exit":
-                (
-                    "Close(t+"
-                    + str(
-                        self.target_horizon
-                    )
-                    + ")"
-                ),
+            "purged":
+                True,
 
-            "formula":
-                (
-                    "Close(t+"
-                    + str(
-                        self.target_horizon
-                    )
-                    + ") / Open(t+1) - 1"
+            "purge_days":
+                int(
+                    self.target_horizon
                 ),
         }
 
 
     # ========================================================
-    # Model Info
+    # Model info
     # ========================================================
 
     def get_model_info(
@@ -1298,92 +1877,70 @@ class StockPredictionModel:
             "model":
                 "RandomForestClassifier",
 
-            "is_trained":
-                self.is_trained,
+            "version":
+                MODEL_VERSION,
 
             "target_horizon":
-                self.target_horizon,
-
-            "target_return_threshold":
-                self.target_return_threshold,
-
-            "feature_count":
-                len(
-                    self.feature_columns
+                int(
+                    self.target_horizon
                 ),
 
-            "features":
-                list(
-                    self.feature_columns
+            "target_return_threshold":
+                float(
+                    self.target_return_threshold
+                ),
+
+            "train_ratio":
+                float(
+                    self.train_ratio
+                ),
+
+            "prediction_threshold":
+                float(
+                    self.prediction_threshold
+                ),
+
+            "purged":
+                True,
+
+            "purge_days":
+                int(
+                    self.target_horizon
                 ),
 
             "n_estimators":
-                self.n_estimators,
+                int(
+                    self.n_estimators
+                ),
 
             "max_depth":
                 self.max_depth,
 
             "min_samples_split":
-                self.min_samples_split,
+                int(
+                    self.min_samples_split
+                ),
 
             "min_samples_leaf":
-                self.min_samples_leaf,
+                int(
+                    self.min_samples_leaf
+                ),
 
             "max_features":
                 self.max_features,
 
             "random_state":
-                self.random_state,
+                int(
+                    self.random_state
+                ),
+
+            "class_weight":
+                self.class_weight,
+
+            "feature_count":
+                int(
+                    len(
+                        self.feature_columns
+                    )
+                ),
         }
-
-
-# ============================================================
-# Helper
-# ============================================================
-
-def train_stock_model(
-    ai_data,
-    target_horizon=3,
-    target_return_threshold=0.0,
-):
-
-    model = StockPredictionModel(
-
-        target_horizon=
-            target_horizon,
-
-        target_return_threshold=
-            target_return_threshold,
-    )
-
-
-    metrics = model.train(
-        ai_data
-    )
-
-
-    return (
-        model,
-        metrics,
-    )
-
-
-# ============================================================
-# Helper
-# ============================================================
-
-def predict_stock_probability(
-    model,
-    ai_data,
-):
-
-    if model is None:
-
-        raise ValueError(
-            "model がありません。"
-        )
-
-
-    return model.predict_probability(
-        ai_data
-    )
